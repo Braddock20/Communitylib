@@ -6,6 +6,7 @@ import feed from './routes/feed.js';
 import units from './routes/units.js';
 import resource from './routes/resource.js';
 import comments from './routes/comments.js';
+import files from './routes/files.js';
 import { getDb, databaseInfo } from './db.js';
 
 const app = new Hono();
@@ -75,6 +76,7 @@ app.route('/api/feed', feed);
 app.route('/api/units', units);
 app.route('/api/resource', resource);
 app.route('/api/resource', comments);
+app.route('/api/files', files);
 
 app.notFound((c) => c.json({ error: 'not found' }, 404));
 
