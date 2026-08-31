@@ -1,0 +1,21 @@
+{
+  "name": "uoe-resources-api",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:push": "psql \"$DATABASE_URL\" -f schema.sql",
+    "db:check": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f schema.sql"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@neondatabase/serverless": "^1.0.0",
+    "aws4fetch": "^1.0.20",
+    "pdf-lib": "^1.17.1"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
