@@ -1,0 +1,17 @@
+# Copy this file to .dev.vars for local Cloudflare development.
+# You may paste the Neon connection string with or without matching quotes.
+# Pooled and unpooled URLs both work.
+DATABASE_URL="postgresql://USER:PASSWORD@HOST/DB?sslmode=require"
+
+B2_KEY_ID=
+B2_APPLICATION_KEY=
+B2_BUCKET=
+B2_ENDPOINT=
+B2_REGION=
+B2_PUBLIC_BASE_URL=
+
+MAX_FILE_SIZE_MB=50
+MAX_FILES_PER_UPLOAD=20
+MAX_TOTAL_UPLOAD_MB=100
+APP_NAME="University of Eldoret Student Resources"
+APP_VERSION="2.0.0"
