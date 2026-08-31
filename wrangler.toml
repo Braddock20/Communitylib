@@ -1,0 +1,28 @@
+name = "uoe-resources-api"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---- Environment variables & secrets ----
+# Set secrets with: wrangler secret put <NAME>
+#
+# DATABASE_URL        -> Neon Postgres connection string (postgres://...)
+# B2_KEY_ID            -> Backblaze B2 application key ID
+# B2_APPLICATION_KEY   -> Backblaze B2 application key
+# B2_BUCKET            -> Backblaze B2 bucket name
+# B2_ENDPOINT          -> e.g. https://s3.eu-central-003.backblazeb2.com
+# B2_REGION            -> e.g. eu-central-003
+# B2_PUBLIC_BASE_URL   -> Public/CDN base url used to build download links
+#
+# vars below are non-secret defaults; override per-environment as needed.
+
+[vars]
+MAX_FILE_SIZE_MB = "50"
+MAX_FILES_PER_UPLOAD = "20"
+MAX_TOTAL_UPLOAD_MB = "100"
+APP_VERSION = "2.0.0"
+APP_NAME = "University of Eldoret Student Resources"
+
+[[routes]]
+pattern = "resources.your-domain.com/*"
+zone_name = "your-domain.com"
