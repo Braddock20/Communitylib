@@ -42,7 +42,12 @@ export function getStorage(env) {
         const text = await res.text().catch(() => '');
         throw new Error(`B2 upload failed (${res.status})${text ? `: ${text.slice(0, 300)}` : ''}`);
       }
-      return { key, url: `${publicBase}/${objectPath(key)}` };
+      // Never hand back a raw B2 URL: the bucket is private, so a direct
+      // link 401s in a browser and a presigned link would expire. This is
+      // a same-origin path into our own /api/files proxy route below,
+      // which signs the request to B2 server-side on every request. It
+      // never expires because it isn't a signature — it's a live proxy.
+      return { key, url: `/api/files/${objectPath(key)}` };
     },
 
     async deleteObject(key) {
@@ -58,6 +63,15 @@ export function getStorage(env) {
       const res = await client.fetch(urlForKey(key), { method: 'GET' });
       if (!res.ok) throw new Error(`B2 fetch failed (${res.status}) for ${key}`);
       return res.arrayBuffer();
+    },
+
+    // Used by the /api/files proxy route. Signs a GET (optionally a byte
+    // range, so PDF viewers and resumable downloads work) and returns the
+    // raw upstream Response so its body can be streamed straight through
+    // without buffering the whole file in Worker memory.
+    async fetchObject(key, range) {
+      const headers = range ? { Range: range } : undefined;
+      return client.fetch(urlForKey(key), { method: 'GET', headers });
     },
 
     publicUrl(key) {
