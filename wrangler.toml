@@ -1,4 +1,4 @@
-name = "uoe-resources-api"
+name = "communitylib"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
@@ -23,6 +23,10 @@ MAX_TOTAL_UPLOAD_MB = "100"
 APP_VERSION = "2.0.0"
 APP_NAME = "University of Eldoret Student Resources"
 
-[[routes]]
-pattern = "resources.your-domain.com/*"
-zone_name = "your-domain.com"
+# No [[routes]] block: this deploys to the default *.workers.dev subdomain.
+# To attach a real custom domain later, use the dashboard instead of editing
+# routes here by hand — Workers & Pages > communitylib > Settings > Domains &
+# Routes > Add > Custom Domain. Pick a domain you actually own and have
+# already added to Cloudflare (e.g. gemi.name.ng or little-tales.net); the
+# UI will only let you pick a zone that actually exists on your account,
+# which avoids this exact "Could not find zone" failure.
