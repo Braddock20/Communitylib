@@ -1,4 +1,35 @@
-# Robustness / stabilization pass
+# Deploy fix + private-bucket downloads
+
+## Deploy failure
+- `wrangler.toml` had a leftover placeholder `[[routes]]` pointing at
+  `your-domain.com`, a zone that doesn't exist on the Cloudflare account.
+  That's what was failing with "Could not find zone" — everything before
+  it (build, bindings, upload) was already succeeding. Removed the block;
+  the Worker now deploys to the default `*.workers.dev` subdomain. A real
+  custom domain can be attached later from the dashboard's Domains &
+  Routes tab instead of hand-editing routes.
+- Renamed the Worker from `uoe-resources-api` to `communitylib` in
+  `wrangler.toml` to match the connected Workers Builds project name and
+  stop the CI name-mismatch warning/auto-PR on every build.
+
+## Private-bucket downloads that never expire
+- `storage.putObject` no longer returns a raw B2 URL. A private bucket
+  returns 401 on those, and a presigned alternative would expire — neither
+  is "forever." It now returns a same-origin `/api/files/<key>` path.
+- Added `src/routes/files.js`, a streaming proxy mounted at `/api/files/*`.
+  Each request is signed to B2 server-side with the existing stored keys
+  and streamed straight through (no buffering the whole file in Worker
+  memory), so the bucket can stay private while the link never expires.
+  Supports byte-range requests (PDF viewers, resumable downloads) and
+  sets long-lived immutable caching, since object keys are UUID-based and
+  never change once uploaded.
+- `resource_files.file_url`, `resources.thumbnail_url`, and
+  `resources.combined_pdf_url` are now relative paths
+  (`/api/files/units/12/notes/uuid-name.pdf`) rather than absolute URLs —
+  the frontend should prepend the API's own base URL to them, the same
+  way it already does for `/api/upload` etc.
+
+
 
 ## Database environment handling
 - Accepts `postgres://` and `postgresql://`.
