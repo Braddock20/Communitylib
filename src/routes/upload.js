@@ -27,7 +27,7 @@ upload.post('/', async (c) => {
     return c.json({ error: `upload exceeds maximum total size of ${Math.round(maxTotalBytes / 1024 / 1024)}MB` }, 413);
   }
 
-  const sql = getDb(env);
+  const sql = await getDb(env);
   const storage = getStorage(env);
 
   let form;
