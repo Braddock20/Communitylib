@@ -15,7 +15,7 @@ const feed = new Hono();
  *              *likely* interesting, random keeps it fresh).
  */
 feed.get('/', async (c) => {
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
 
   const [trending, mostDownloaded, recentlyAdded, discover] = await Promise.all([
     sql`
