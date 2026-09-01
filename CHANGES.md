@@ -1,3 +1,33 @@
+# Resilient DB connection + observability
+
+## Multi-candidate DB connection with real fallback
+- `db.js` previously only fell back from `DATABASE_URL` to the next env var
+  if the *string failed to parse* — a syntactically valid but wrong/dead
+  credential just failed outright. `getDb()`/`resolveDb()` now actually
+  test-query (`SELECT 1`) each candidate in order (`DATABASE_URL` →
+  `DATABASE_URL_UNPOOLED` → `POSTGRES_URL` → `POSTGRES_URL_NON_POOLING` →
+  `NEON_DATABASE_URL`) and use the first one that really connects — so a
+  bad pooled connection can fall back to a working direct one without a
+  redeploy. The winning candidate is cached per-isolate so this doesn't
+  add a round trip to every request, only the first one.
+- `normalizeDatabaseUrl` now also recovers from a whole `.env` block being
+  pasted in as a secret value (comment lines, a second `KEY=value` line) by
+  keeping only the first non-comment line — this was silently producing an
+  unparsable multi-line "URL" before.
+- `/health/db` now reports which env var actually worked
+  (`{"ok":true,"database":"reachable","source":"DATABASE_URL_UNPOOLED"}`),
+  and on failure logs a per-candidate breakdown (hostnames only, never
+  credentials) to Workers Logs / `wrangler tail` instead of a single opaque
+  message — the client response stays generic either way.
+
+## Observability
+- Added `[observability]` to `wrangler.toml`: logs (with invocation logs)
+  and traces enabled, so `console.error` calls like the one in `/health/db`
+  are visible in the dashboard's Logs/Observability tab without needing
+  `wrangler tail`.
+
+---
+
 # Deploy fix + private-bucket downloads
 
 ## Deploy failure
