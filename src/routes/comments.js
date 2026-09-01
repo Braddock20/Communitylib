@@ -7,7 +7,7 @@ comments.get('/:id/comments', async (c) => {
   const id = c.req.param('id');
   if (!/^\d+$/.test(id)) return c.json({ error: 'invalid resource id' }, 400);
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   const rows = await sql`
     SELECT id, author_name, content, created_at
     FROM comments
@@ -22,7 +22,7 @@ comments.post('/:id/comments', async (c) => {
   const id = c.req.param('id');
   if (!/^\d+$/.test(id)) return c.json({ error: 'invalid resource id' }, 400);
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   let body;
   try {
     body = await c.req.json();
