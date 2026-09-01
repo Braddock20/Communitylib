@@ -13,7 +13,7 @@ search.get('/suggest', async (c) => {
   const q = (c.req.query('q') || '').trim();
   if (q.length < 1) return c.json({ suggestions: [] });
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   const codeLike = normalizeCode(q);
 
   const rows = await sql`
@@ -49,7 +49,7 @@ search.get('/', async (c) => {
   const q = (c.req.query('q') || '').trim();
   if (!q) return c.json({ error: 'q is required' }, 400);
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   const codeLike = normalizeCode(q);
 
   const units = await sql`
