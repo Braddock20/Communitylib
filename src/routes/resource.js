@@ -11,7 +11,7 @@ resource.get('/:id', async (c) => {
   const id = c.req.param('id');
   if (!validId(id)) return c.json({ error: 'invalid resource id' }, 400);
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   const [res] = await sql`SELECT * FROM resources WHERE id = ${id} AND is_flagged = false`;
   if (!res) return c.json({ error: 'resource not found' }, 404);
 
@@ -33,7 +33,7 @@ resource.get('/:id/download', async (c) => {
   const id = c.req.param('id');
   if (!validId(id)) return c.json({ error: 'invalid resource id' }, 400);
 
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
   const [res] = await sql`SELECT * FROM resources WHERE id = ${id} AND is_flagged = false`;
   if (!res) return c.json({ error: 'resource not found' }, 404);
 
