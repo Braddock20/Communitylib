@@ -30,3 +30,24 @@ APP_NAME = "University of Eldoret Student Resources"
 # already added to Cloudflare (e.g. gemi.name.ng or little-tales.net); the
 # UI will only let you pick a zone that actually exists on your account,
 # which avoids this exact "Could not find zone" failure.
+
+# ---- Observability (Workers Logs + Traces) ----
+# NOTE: your pasted config had the top-level `enabled` as false — that's the
+# master switch, so leaving it false would have disabled logs/traces
+# entirely regardless of the nested settings. Set to true here since the
+# whole point is to see errors in the dashboard's Logs/Observability tab.
+[observability]
+enabled = true
+head_sampling_rate = 1
+redact_query_string = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
