@@ -7,7 +7,7 @@ const units = new Hono();
 /** GET /api/units/:id - full detail page: unit info + all resources, nicely grouped */
 units.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const sql = getDb(c.env);
+  const sql = await getDb(c.env);
 
   const [unit] = await sql`SELECT * FROM units WHERE id = ${id}`;
   if (!unit) return c.json({ error: 'unit not found' }, 404);
