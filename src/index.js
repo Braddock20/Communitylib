@@ -7,7 +7,7 @@ import units from './routes/units.js';
 import resource from './routes/resource.js';
 import comments from './routes/comments.js';
 import files from './routes/files.js';
-import { getDb, databaseInfo } from './db.js';
+import { resolveDb, databaseInfo } from './db.js';
 
 const app = new Hono();
 
@@ -61,11 +61,12 @@ app.get('/health', (c) => c.json({ ok: true }));
 // leaking credentials or connection strings.
 app.get('/health/db', async (c) => {
   try {
-    const sql = getDb(c.env);
-    await sql`SELECT 1 AS ok`;
-    return c.json({ ok: true, database: 'reachable' });
+    const { source } = await resolveDb(c.env);
+    return c.json({ ok: true, database: 'reachable', source });
   } catch (err) {
-    console.error('database health check failed', err);
+    // Full detail (hostnames + per-candidate error, never credentials)
+    // goes to Workers Logs / wrangler tail only.
+    console.error('database health check failed', err?.message || err);
     return c.json({ ok: false, database: 'unreachable' }, 503);
   }
 });
