@@ -44,9 +44,9 @@ export function getStorage(env) {
       }
       // Never hand back a raw B2 URL: the bucket is private, so a direct
       // link 401s in a browser and a presigned link would expire. This is
-      // a same-origin path into our own /api/files proxy route below,
-      // which signs the request to B2 server-side on every request. It
-      // never expires because it isn't a signature — it's a live proxy.
+      // a same-origin path into our own /api/files proxy route, which
+      // signs the request to B2 server-side on every request. It never
+      // expires because it isn't a signature — it's a live proxy.
       return { key, url: `/api/files/${objectPath(key)}` };
     },
 
