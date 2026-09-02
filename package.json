@@ -1,13 +1,11 @@
 {
-  "name": "uoe-resources-api",
-  "version": "2.0.0",
+  "name": "communitylib",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:push": "psql \"$DATABASE_URL\" -f schema.sql",
-    "db:check": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f schema.sql"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "hono": "^4.6.0",
