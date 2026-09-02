@@ -68,7 +68,7 @@ search.get('/', async (c) => {
     return c.json({ query: q, results: [] });
   }
 
-  // log the search for trending/feed-learning purposes (best-effort, non-blocking)
+  // Log the search for trending/feed-learning purposes (best-effort, non-blocking).
   const topUnit = units[0];
   c.executionCtx?.waitUntil?.(
     sql.transaction([
