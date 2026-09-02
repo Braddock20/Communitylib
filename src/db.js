@@ -7,8 +7,8 @@ import { neon } from '@neondatabase/serverless';
  *   'postgres://...'
  *   DATABASE_URL=postgres://...
  *
- * Pooled and unpooled Neon URLs are both valid; we deliberately do not
- * rewrite the hostname because Neon decides pooling from the URL itself.
+ * Pooled and unpooled Neon URLs are both valid; the hostname is never
+ * rewritten because Neon decides pooling from the URL itself.
  */
 export function normalizeDatabaseUrl(raw) {
   if (raw == null) return '';
@@ -17,8 +17,7 @@ export function normalizeDatabaseUrl(raw) {
 
   // If someone pasted an entire .env-style block (multiple lines, a
   // comment, a second KEY=value line), keep only the first non-comment,
-  // non-blank line. Pasting the whole block verbatim is a common mistake
-  // and previously produced an unparsable multi-line "URL".
+  // non-blank line.
   if (value.includes('\n')) {
     const firstUsableLine = value
       .split('\n')
@@ -69,13 +68,8 @@ function candidateEnvEntries(env) {
     .filter(({ raw }) => raw != null && String(raw).trim() !== '');
 }
 
-function candidateEnvValues(env) {
-  return candidateEnvEntries(env).map(({ raw }) => raw);
-}
-
 export function getDatabaseUrl(env) {
-  const candidates = candidateEnvValues(env);
-  for (const raw of candidates) {
+  for (const { raw } of candidateEnvEntries(env)) {
     const url = normalizeDatabaseUrl(raw);
     try {
       const parsed = new URL(url);
@@ -93,18 +87,18 @@ export function getDatabaseUrl(env) {
 }
 
 // Per-isolate cache. A Worker isolate handles many requests over its
-// lifetime, so once we find a candidate that actually connects, reuse it
-// instead of re-testing every candidate on every request. If the cached
-// one starts failing later (e.g. a rotated password) the isolate will
-// surface that error until it's recycled, which happens naturally.
+// lifetime, so once a candidate actually connects, reuse it instead of
+// re-testing every candidate on every request.
 let cachedWorkingUrl = null;
 let cachedWorkingSource = null;
 
 /**
  * Try every configured candidate, in order, until one actually answers a
- * query — not just parses as a valid URL. This is what lets a bad pooled
- * connection fall back to a working direct/unpooled one (or vice versa)
- * without a redeploy. Returns { sql, source, url }.
+ * query — not just parses as a valid URL. Returns { sql, source, url }.
+ * On total failure, throws an Error whose `.attempts` property is a
+ * structured (never-credential-bearing) breakdown of what was tried and
+ * why each one failed, so a caller can choose to surface it for debugging
+ * without exposing it to the public by default.
  */
 export async function resolveDb(env) {
   if (cachedWorkingUrl) {
@@ -112,13 +106,16 @@ export async function resolveDb(env) {
   }
 
   const entries = candidateEnvEntries(env);
+  const attempts = [];
+
   if (entries.length === 0) {
-    throw new Error(
+    const err = new Error(
       'No database env var is set. Expected one of: ' + CANDIDATE_ENV_NAMES.join(', ')
     );
+    err.attempts = attempts;
+    throw err;
   }
 
-  const attempts = [];
   for (const { name, raw } of entries) {
     const url = normalizeDatabaseUrl(raw);
 
@@ -126,11 +123,11 @@ export async function resolveDb(env) {
     try {
       parsed = new URL(url);
       if (!((parsed.protocol === 'postgres:' || parsed.protocol === 'postgresql:') && parsed.hostname)) {
-        attempts.push(`${name}: does not look like a postgres:// URL`);
+        attempts.push({ source: name, ok: false, reason: 'does not look like a postgres:// URL' });
         continue;
       }
     } catch {
-      attempts.push(`${name}: failed to parse as a URL`);
+      attempts.push({ source: name, ok: false, reason: 'failed to parse as a URL' });
       continue;
     }
 
@@ -141,13 +138,18 @@ export async function resolveDb(env) {
       cachedWorkingSource = name;
       return { sql, source: name, url };
     } catch (err) {
-      attempts.push(`${name} (${parsed.hostname}): ${err?.message || err}`);
+      attempts.push({
+        source: name,
+        ok: false,
+        host: parsed.hostname,
+        reason: err?.message || String(err),
+      });
     }
   }
 
-  // Logged server-side only (Workers Logs / wrangler tail) — never sent to
-  // the client. Hostnames only, never credentials.
-  throw new Error(`No database candidate could connect. Tried:\n${attempts.join('\n')}`);
+  const err = new Error('No database candidate could connect.');
+  err.attempts = attempts;
+  throw err;
 }
 
 /** Back-compat convenience: resolve and return just the tagged-template client. */
@@ -157,10 +159,10 @@ export async function getDb(env) {
 }
 
 /**
- * Redacted connection diagnostics for health/admin logs. Never return the
- * password or full connection string to clients. Reflects the first
- * *parseable* candidate, which may not be the one that actually connects —
- * use resolveDb()/getDb() for that.
+ * Redacted connection diagnostics for admin logs. Never returns the
+ * password or full connection string. Reflects the first *parseable*
+ * candidate, which may not be the one that actually connects — use
+ * resolveDb()/getDb() for that.
  */
 export function databaseInfo(env) {
   const url = getDatabaseUrl(env);
