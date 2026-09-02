@@ -12,9 +12,29 @@ const ALLOWED_EXTS = new Set([
   'jpg', 'jpeg', 'png', 'webp',
 ]);
 
+// Postgres SQLSTATE for a unique-constraint violation. resource_files.file_hash
+// is globally unique, so two near-simultaneous uploads of the same file can
+// both pass the pre-insert duplicate check and race to insert — one wins,
+// the other hits this. Caught explicitly below so the loser gets a clean
+// 409 instead of a generic 500.
+const PG_UNIQUE_VIOLATION = '23505';
+
 function envInt(env, key, fallback, min, max) {
   const n = Number.parseInt(env?.[key] ?? '', 10);
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+function sanitizeFilename(name) {
+  const cleaned = String(name || 'file').normalize('NFKC')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^\.+/, '')
+    .slice(-100);
+  return cleaned || 'file';
+}
+
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 upload.post('/', async (c) => {
@@ -191,10 +211,9 @@ upload.post('/', async (c) => {
       uploadedFiles.every((f) => isPdfConvertibleImageExt(f.ext));
 
     let combinedPdfUrl = null;
-    let combinedPdfKey = null;
     if (canCombineImages) {
       const pdfBytes = await imagesToPdf(uploadedFiles.map((f) => ({ bytes: f.bytes, ext: f.ext })));
-      combinedPdfKey = `units/${unit.id}/${type}/${crypto.randomUUID()}-combined.pdf`;
+      const combinedPdfKey = `units/${unit.id}/${type}/${crypto.randomUUID()}-combined.pdf`;
       combinedPdfUrl = (await storage.putObject(combinedPdfKey, pdfBytes, 'application/pdf')).url;
       uploadedKeys.push(combinedPdfKey);
     }
@@ -252,9 +271,18 @@ upload.post('/', async (c) => {
         WHERE id = ${unit.id}
       `;
     } catch (err) {
-      // Most importantly: don't leave B2 objects behind if DB insertion
-      // loses a race on a duplicate hash/content hash.
+      // Don't leave B2 objects behind if the DB insert loses a race.
       await Promise.allSettled(uploadedKeys.map((key) => storage.deleteObject(key)));
+
+      // Someone else uploaded the exact same file in the tiny window
+      // between our pre-check SELECT and this INSERT — resolve it as a
+      // normal duplicate response instead of a 500.
+      if (err?.code === PG_UNIQUE_VIOLATION) {
+        return c.json({
+          error: 'duplicate_files',
+          message: 'One or more of these files were uploaded by someone else just now.',
+        }, 409);
+      }
       throw err;
     }
 
@@ -272,18 +300,5 @@ upload.post('/', async (c) => {
     throw err;
   }
 });
-
-function sanitizeFilename(name) {
-  const cleaned = String(name || 'file').normalize('NFKC')
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .replace(/\.{2,}/g, '.')
-    .replace(/^\.+/, '')
-    .slice(-100);
-  return cleaned || 'file';
-}
-
-function capitalize(s) {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 export default upload;
