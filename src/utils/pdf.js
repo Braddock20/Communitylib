@@ -32,5 +32,8 @@ export function isPdfExt(ext) {
 }
 
 export function isPdfConvertibleImageExt(ext) {
+  // webp deliberately excluded — pdf-lib can only embed PNG/JPEG. A webp
+  // file stays as a standalone image resource instead of joining the
+  // combined PDF (see upload.js).
   return ['jpg', 'jpeg', 'png'].includes((ext || '').toLowerCase());
 }
