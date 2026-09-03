@@ -102,11 +102,23 @@ app.notFound((c) => c.json({ error: 'not found' }, 404));
 
 app.onError((err, c) => {
   console.error('request failed', err);
-  // Never send database/B2/internal error strings to a public client.
-  return c.json(
-    { error: 'internal_server_error', message: 'Something went wrong. Please try again.' },
-    500
-  );
+
+  const body = { error: 'internal_server_error', message: 'Something went wrong. Please try again.' };
+
+  // Same opt-in mechanism as /health/db: append ?debug_key=YOUR_KEY (or an
+  // X-Debug-Key header) to see the real error instead of the generic
+  // message. Never sent to a public client unless DEBUG_KEY is set AND
+  // matched.
+  const debugKey = c.env.DEBUG_KEY;
+  const providedKey = c.req.header('x-debug-key') || c.req.query('debug_key');
+  if (debugKey && providedKey === debugKey) {
+    body.debug = {
+      message: err?.message || String(err),
+      stack: (err?.stack || '').split('\n').slice(0, 6),
+    };
+  }
+
+  return c.json(body, 500);
 });
 
 export default app;
