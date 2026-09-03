@@ -1,4 +1,4 @@
-name = "uoe-library"
+name = "communitylib"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
