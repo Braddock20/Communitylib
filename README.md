@@ -83,7 +83,7 @@ that's what caused the "Could not find zone" deploy failure last time.
 Set the optional `DEBUG_KEY` secret (any random string), then visit:
 
 ```
-https://communitylib.talesapi.workers.dev/health/db?debug_key=YOUR_KEY
+https://uoe-library.talesapi.workers.dev/health/db?debug_key=YOUR_KEY
 ```
 
 in a normal browser tab. On failure you'll get the exact reason —
