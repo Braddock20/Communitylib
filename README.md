@@ -143,6 +143,22 @@ GET  /health/db[?debug_key=...]
 
 POST /api/upload                 multipart/form-data
 
+### Notes metadata
+For `type=notes`, `note_scope` can be `complete` or `topical`. It defaults to
+`complete`. When `note_scope=topical`, `topics` is optional and may contain
+one or many topic names. Clients may send `topics` repeatedly or send a
+comma-separated value. `unit_code` remains compulsory for every upload.
+
+Examples:
+- Complete notes: `type=notes`, `note_scope=complete`, `unit_code=MAT201`
+- One topic: `type=notes`, `note_scope=topical`, `topics=Integration`, `unit_code=MAT201`
+- Multiple topics: repeat `topics` or use `topics=Integration,Differentiation`,
+  `unit_code=MAT201`
+
+Topical note resources are returned separately as `grouped.topical_notes`,
+while complete notes remain in `grouped.notes`. Topic names are also included
+in resource responses and are searchable through `/api/search`.
+
 GET  /api/search?q=...
 GET  /api/search/suggest?q=...
 
