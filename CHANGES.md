@@ -1,3 +1,47 @@
+# v3.2.0 — endpoint-test fixes
+
+Two small bugs found by a full end-to-end smoke test of every route
+(`/api/feed`, `/api/search`, `/api/search/suggest`, `/api/upload`,
+`/api/units/:id`, `/api/resource/:id`, `/api/files/*`, comments, health).
+
+## Fixed
+- **`/api/units/abc` returned 500** instead of 400. The handler skipped the
+  `/^\d+$/` id-format check that every other route already does, so a
+  non-numeric id was sent straight to Postgres and surfaced as
+  `invalid input syntax for type integer: "abc"`. Added the same guard
+  `resource.js` and `comments.js` already have.
+
+## Docs
+- `schema.sql` now has an explicit banner above the v3.1 migration block
+  flagging that the two `ALTER TABLE … ADD COLUMN IF NOT EXISTS` statements
+  are **required** on any pre-v3.1 database — without them `/api/upload`,
+  `/api/search` and `/api/search/suggest` all 500 with
+  `column "note_scope" / "topics" of relation "resources" does not exist`.
+  Re-running the migration is safe (every line is `IF NOT EXISTS`).
+
+No behaviour change for clients; no schema change in v3.2 itself — only the
+source-level fix in `units.js` and a louder comment in `schema.sql`.
+
+---
+
+# v3.1.0 — topical notes
+
+- New `note_scope` (`complete` | `topical`) and `topics TEXT[]` columns on
+  `resources`, with a CHECK constraint enforcing
+  `type = 'notes' OR (note_scope = 'complete' AND cardinality(topics) = 0)`.
+- `POST /api/upload` accepts `note_scope=topical` plus a `topics` field
+  (repeated or comma-separated; up to 30 distinct names, 120 chars each).
+- `/api/search` and `/api/search/suggest` match on topic names via
+  `unnest(r.topics)` + trigram similarity.
+- `groupResources` now returns `grouped.topical_notes` separately from
+  `grouped.notes` so UIs can render them distinctly.
+- New `idx_resources_topics` GIN index for fast topic lookups.
+
+If you're upgrading an existing database, run the new `ALTER TABLE` block at
+the bottom of `schema.sql` — see the banner above it.
+
+---
+
 # v3.0.0 — clean rebuild
 
 Full rewrite of every source file from scratch. API surface, routes, and
