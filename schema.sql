@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS resources (
 );
 
 -- Add note metadata safely when upgrading an existing database.
+-- ============================================================
+-- v3.1+ migration. Required if you ran schema.sql against Neon
+-- BEFORE the topical-notes feature was added — without these
+-- two columns, /api/upload, /api/search and /api/search/suggest
+-- will all return 500 (column "note_scope" / "topics" not found).
+-- Safe to re-run: every line below is idempotent.
+-- ============================================================
 ALTER TABLE resources ADD COLUMN IF NOT EXISTS note_scope TEXT NOT NULL DEFAULT 'complete';
 ALTER TABLE resources ADD COLUMN IF NOT EXISTS topics TEXT[] NOT NULL DEFAULT '{}'::text[];
 
