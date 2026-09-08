@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS resources (
   id              BIGSERIAL PRIMARY KEY,
   unit_id         INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
   type            resource_type NOT NULL,
+  note_scope      TEXT NOT NULL DEFAULT 'complete', -- complete or topical (notes only)
+  topics          TEXT[] NOT NULL DEFAULT '{}'::text[], -- optional topic names for topical notes
   academic_year   SMALLINT,                     -- e.g. 2023 (relevant for cat/exam), NULL for notes
   title           TEXT NOT NULL,                 -- e.g. "CAT 1 - Semester 1" or "Full notes: Chapters 1-6"
   uploader_name   TEXT,                          -- optional / can be "Anonymous"
@@ -77,12 +79,36 @@ CREATE TABLE IF NOT EXISTS resources (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Add note metadata safely when upgrading an existing database.
+ALTER TABLE resources ADD COLUMN IF NOT EXISTS note_scope TEXT NOT NULL DEFAULT 'complete';
+ALTER TABLE resources ADD COLUMN IF NOT EXISTS topics TEXT[] NOT NULL DEFAULT '{}'::text[];
+
 CREATE INDEX IF NOT EXISTS idx_resources_unit ON resources (unit_id);
+CREATE INDEX IF NOT EXISTS idx_resources_topics ON resources USING gin (topics);
 CREATE INDEX IF NOT EXISTS idx_resources_type_year ON resources (unit_id, type, academic_year);
 CREATE INDEX IF NOT EXISTS idx_resources_download_count ON resources (download_count DESC);
 CREATE INDEX IF NOT EXISTS idx_resources_created_at ON resources (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_resources_content_hash ON resources (content_hash);
 CREATE INDEX IF NOT EXISTS idx_resources_visible_unit_created ON resources (unit_id, created_at DESC) WHERE is_flagged = false;
+
+-- ---------- Notes metadata migration / validation ----------
+-- Notes can be either a complete set or topical notes. Topic names are optional
+-- for topical notes, and unit_code remains compulsory at upload time.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'resources_note_scope_valid') THEN
+    ALTER TABLE resources ADD CONSTRAINT resources_note_scope_valid
+      CHECK (note_scope IN ('complete', 'topical'));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'resources_note_metadata_valid') THEN
+    ALTER TABLE resources ADD CONSTRAINT resources_note_metadata_valid
+      CHECK (
+        type = 'notes'
+        OR (note_scope = 'complete' AND cardinality(topics) = 0)
+      );
+  END IF;
+END $$;
 
 -- ---------- Resource Files ----------
 -- The individual files inside a resource (handles "notes come in chunks").
