@@ -69,8 +69,33 @@ upload.post('/', async (c) => {
   const note = (form.get('note') || '').toString().trim().slice(0, 1000);
   const resourceTitle = (form.get('title') || '').toString().trim().slice(0, 200);
 
+  // Notes have a small metadata branch: complete or topical. Topical notes
+  // may have zero, one, or many topic names. Accept both repeated `topics`
+  // fields and a single comma-separated `topic`/`topics` value for clients.
+  const noteScopeRaw = (form.get('note_scope') || 'complete').toString().trim().toLowerCase();
+  const topicInputs = [
+    ...form.getAll('topics').map((v) => String(v)),
+    ...form.getAll('topic').map((v) => String(v)),
+  ];
+  const topics = [...new Set(
+    topicInputs
+      .flatMap((v) => v.split(','))
+      .map((v) => v.trim().replace(/\s+/g, ' '))
+      .filter(Boolean)
+      .map((v) => v.slice(0, 120))
+  )].slice(0, 30);
+
   if (!unitCodeRaw || !unitTitle) {
     return c.json({ error: 'unit_code and unit_title are required' }, 400);
+  }
+  if (!['complete', 'topical'].includes(noteScopeRaw)) {
+    return c.json({ error: 'note_scope must be complete or topical' }, 400);
+  }
+  if (type !== 'notes' && (noteScopeRaw !== 'complete' || topics.length > 0)) {
+    return c.json({ error: 'note_scope and topics are only valid for notes' }, 400);
+  }
+  if (type === 'notes' && noteScopeRaw === 'complete' && topics.length > 0) {
+    return c.json({ error: 'complete notes cannot have topics; choose topical instead' }, 400);
   }
   if (!VALID_TYPES.has(type)) {
     return c.json({ error: `type must be one of: ${[...VALID_TYPES].join(', ')}` }, 400);
@@ -221,6 +246,8 @@ upload.post('/', async (c) => {
     const primaryExt = allImages ? 'image' : uploadedFiles.length === 1 ? uploadedFiles[0].ext : 'mixed';
     const thumbnailUrl = allImages ? uploadedFiles[0].url : null;
 
+    const noteScope = type === 'notes' ? noteScopeRaw : 'complete';
+
     const finalTitle = resourceTitle ||
       (type === 'cat' ? `CAT - ${academicYear}` :
        type === 'exam' ? `Exam - ${academicYear}` :
@@ -241,10 +268,10 @@ upload.post('/', async (c) => {
       await sql`
         WITH inserted AS (
           INSERT INTO resources
-            (unit_id, type, academic_year, title, uploader_name, note, file_count,
+            (unit_id, type, note_scope, topics, academic_year, title, uploader_name, note, file_count,
              primary_ext, thumbnail_url, combined_pdf_url, content_hash)
           VALUES
-            (${unit.id}, ${type}, ${academicYear}, ${finalTitle}, ${uploaderName},
+            (${unit.id}, ${type}, ${noteScope}, ${topics}, ${academicYear}, ${finalTitle}, ${uploaderName},
              ${note || null}, ${uploadedFiles.length}, ${primaryExt}, ${thumbnailUrl},
              ${combinedPdfUrl}, ${contentHash})
           RETURNING id
