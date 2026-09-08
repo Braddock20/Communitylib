@@ -22,6 +22,11 @@ search.get('/suggest', async (c) => {
     WHERE code ILIKE ${codeLike + '%'}
        OR title ILIKE ${'%' + q + '%'}
        OR similarity(title, ${q}) > 0.2
+       OR EXISTS (
+         SELECT 1 FROM resources r, unnest(r.topics) AS topic
+         WHERE r.unit_id = units.id AND r.is_flagged = false
+           AND (topic ILIKE ${'%' + q + '%'} OR similarity(topic, ${q}) > 0.2)
+       )
     ORDER BY
       (code ILIKE ${codeLike + '%'}) DESC,   -- exact code prefix first
       resource_count DESC
@@ -55,11 +60,24 @@ search.get('/', async (c) => {
   const units = await sql`
     SELECT *,
       (code ILIKE ${codeLike + '%'}) AS code_match,
-      GREATEST(similarity(title, ${q}), similarity(code_display, ${q})) AS rank
+      GREATEST(
+        similarity(title, ${q}),
+        similarity(code_display, ${q}),
+        COALESCE((
+          SELECT MAX(similarity(topic, ${q}))
+          FROM resources r, unnest(r.topics) AS topic
+          WHERE r.unit_id = units.id AND r.is_flagged = false
+        ), 0)
+      ) AS rank
     FROM units
     WHERE code ILIKE ${'%' + codeLike + '%'}
        OR title ILIKE ${'%' + q + '%'}
        OR similarity(title, ${q}) > 0.15
+       OR EXISTS (
+         SELECT 1 FROM resources r, unnest(r.topics) AS topic
+         WHERE r.unit_id = units.id AND r.is_flagged = false
+           AND (topic ILIKE ${'%' + q + '%'} OR similarity(topic, ${q}) > 0.15)
+       )
     ORDER BY code_match DESC, rank DESC, resource_count DESC
     LIMIT 20
   `;
@@ -79,7 +97,7 @@ search.get('/', async (c) => {
 
   const unitIds = units.map((u) => u.id);
   const resources = await sql`
-    SELECT id, unit_id, type, academic_year, title, uploader_name, note, file_count,
+    SELECT id, unit_id, type, note_scope, topics, academic_year, title, uploader_name, note, file_count,
            primary_ext, thumbnail_url, combined_pdf_url, download_count, view_count,
            comment_count, created_at
     FROM resources
@@ -106,7 +124,9 @@ search.get('/', async (c) => {
 
 /** Nicely group a flat resource list into notes / cats-by-year / exams-by-year / other */
 export function groupResources(resources) {
-  const notes = resources.filter((r) => r.type === 'notes');
+  const noteResources = resources.filter((r) => r.type === 'notes');
+  const completeNotes = noteResources.filter((r) => r.note_scope !== 'topical');
+  const topicalNotes = noteResources.filter((r) => r.note_scope === 'topical');
   const assignments = resources.filter((r) => r.type === 'assignment');
   const other = resources.filter((r) => r.type === 'other');
 
@@ -125,7 +145,8 @@ export function groupResources(resources) {
   };
 
   return {
-    notes,
+    notes: completeNotes,
+    topical_notes: topicalNotes,
     cats: byYear('cat'),
     exams: byYear('exam'),
     assignments,
