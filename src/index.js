@@ -7,6 +7,7 @@ import units from './routes/units.js';
 import resource from './routes/resource.js';
 import comments from './routes/comments.js';
 import files from './routes/files.js';
+import ai from './routes/ai.js';
 import { resolveDb } from './db.js';
 
 const app = new Hono();
@@ -37,6 +38,7 @@ app.use(
       'X-Request-ID',
       'Range',
       'X-Debug-Key',
+      'X-Admin-Key',
     ],
     exposeHeaders: [
       'Content-Length',
@@ -97,6 +99,7 @@ app.route('/api/units', units);
 app.route('/api/resource', resource);
 app.route('/api/resource', comments);
 app.route('/api/files', files);
+app.route('/api/ai', ai);
 
 app.notFound((c) => c.json({ error: 'not found' }, 404));
 
