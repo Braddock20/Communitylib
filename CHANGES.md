@@ -1,3 +1,15 @@
+# v4.1.0 — performance and safety hardening
+
+- Fixed unit-code scanning at the start of document text and optimized full-registry scans.
+- Verified AI primary-unit fallback and returned all detected units as registry matches.
+- Added strict file MIME handling, `nosniff`, attachment disposition for opaque documents, and public visibility checks that respect moderation.
+- Added admin authorization to stored-segment inspection and tightened debug-key handling.
+- Added pre-download PDF size checks, 15 MB processing limits, and bounded multi-image conversion.
+- Added public API rate limits, indexed resource topics, and covering feed indexes.
+- Fixed upload persistence of `mime_type`/`display_name` and post-commit cleanup behavior.
+- Added migration `005_performance_safety.sql`; apply it before deploying this version.
+- Public Workers AI inference is disabled by default in the checked-in config. Enable it intentionally after deployment if desired.
+
 # v3.0.0 — clean rebuild
 
 Full rewrite of every source file from scratch. API surface, routes, and
@@ -10,7 +22,7 @@ this API keeps working. Two concrete fixes and one workflow change:
   host, why it failed — never credentials) attached to the thrown error.
   `/health/db` stays generic by default, but an optional `DEBUG_KEY`
   secret unlocks the full breakdown at
-  `/health/db?debug_key=YOUR_KEY` in a plain browser tab — no
+  `/health/db` with an `X-Debug-Key` request header — no
   `wrangler tail`, no Logs dashboard tab needed.
 - **Duplicate-upload race returned a 500.** `resource_files.file_hash` is
   globally unique; two near-simultaneous uploads of the same file can
