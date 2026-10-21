@@ -89,7 +89,40 @@ CREATE INDEX IF NOT EXISTS idx_resources_type_year ON resources (unit_id, type, 
 CREATE INDEX IF NOT EXISTS idx_resources_download_count ON resources (download_count DESC);
 CREATE INDEX IF NOT EXISTS idx_resources_created_at ON resources (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_resources_content_hash ON resources (content_hash);
+CREATE INDEX IF NOT EXISTS idx_resources_combined_pdf_url ON resources (combined_pdf_url) WHERE combined_pdf_url IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_resources_visible_unit_created ON resources (unit_id, created_at DESC) WHERE is_flagged = false;
+
+-- Indexed topic terms avoid repeatedly unnesting every resource topic during
+-- unit search. Migration 005 also creates this for existing installations.
+CREATE TABLE IF NOT EXISTS resource_topics (
+  resource_id BIGINT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+  topic TEXT NOT NULL,
+  normalized_topic TEXT NOT NULL,
+  PRIMARY KEY (resource_id, normalized_topic)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_topics_unit ON resource_topics (unit_id);
+CREATE INDEX IF NOT EXISTS idx_resource_topics_topic_trgm ON resource_topics USING gin (topic gin_trgm_ops);
+
+CREATE OR REPLACE FUNCTION communitylib_sync_resource_topics() RETURNS trigger AS $$
+BEGIN
+  DELETE FROM resource_topics WHERE resource_id = NEW.id;
+  INSERT INTO resource_topics(resource_id, unit_id, topic, normalized_topic)
+  SELECT DISTINCT ON (normalized_topic) NEW.id, NEW.unit_id, btrim(topic_value),
+         regexp_replace(lower(btrim(topic_value)), '[[:space:]]+', ' ', 'g') AS normalized_topic
+  FROM unnest(COALESCE(NEW.topics, '{}'::text[])) AS topic_value
+  WHERE btrim(topic_value) <> ''
+  ORDER BY normalized_topic
+  ON CONFLICT (resource_id, normalized_topic)
+  DO UPDATE SET unit_id=EXCLUDED.unit_id, topic=EXCLUDED.topic;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_resources_sync_topics ON resources;
+CREATE TRIGGER trg_resources_sync_topics
+AFTER INSERT OR UPDATE OF topics, unit_id ON resources
+FOR EACH ROW EXECUTE FUNCTION communitylib_sync_resource_topics();
 
 -- ---------- Notes metadata migration / validation ----------
 -- Notes can be either a complete set or topical notes. Topic names are optional
@@ -126,6 +159,7 @@ CREATE TABLE IF NOT EXISTS resource_files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_resource_files_resource ON resource_files (resource_id, order_index);
+CREATE INDEX IF NOT EXISTS idx_resource_files_file_url ON resource_files (file_url);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_files_hash_unit ON resource_files (file_hash);
 
 -- ---------- Comments ----------
