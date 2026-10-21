@@ -20,7 +20,8 @@ ai.use('*', async (c, next) => {
   // CORS preflight requests should not consume API rate-limit tokens.
   if (c.req.method === 'OPTIONS') return next();
 
-  const path = new URL(c.req.url).pathname;
+  const path = new URL(c.req.url).pathname
+  .replace(/^\/api\/ai(?=\/|$)/, '') || '/';
   const method = c.req.method;
 
   let binding;
