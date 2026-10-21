@@ -32,6 +32,7 @@ ai.use('*', async (c, next) => {
   } else if (
     path === '/registry/import' ||
     path === '/segments' ||
+    /^\/segments\/\d+$/.test(path) ||
     /^\/split\/\d+$/.test(path) ||
     /^\/publish-segments\/\d+$/.test(path) ||
     path === '/merge' ||
@@ -74,11 +75,19 @@ ai.use('*', async (c, next) => {
   await next();
 });
 
+function constantTimeEqual(a, b) {
+  const left = new TextEncoder().encode(String(a));
+  const right = new TextEncoder().encode(String(b));
+  let diff = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) diff |= (left[i] || 0) ^ (right[i] || 0);
+  return diff === 0;
+}
 function authorized(c) {
   const key = c.env.ADMIN_API_KEY;
   const supplied = c.req.header('authorization')?.replace(/^Bearer\s+/i, '') ||
     c.req.header('x-admin-key');
-  return Boolean(key && supplied && supplied === key);
+  return Boolean(key && supplied && constantTimeEqual(supplied, key));
 }
 function clampConfidence(value, fallback = 0.35) {
   const n = Number(value);
@@ -100,8 +109,9 @@ function fallbackAnalysis({ text, filename, registry }) {
   const detected = [...detectedByCode];
   const already = new Set(detected.map((u) => String(u.id ?? normalizeCode(u.code))));
 
-  // Titles/aliases are a secondary fallback only when no registry code was found.
-  if (detected.length === 0) {
+  // Search titles/aliases as well as explicit codes. A combined document may
+  // name one unit by code and a second only by its full title.
+  {
     for (const unit of registry) {
       const key = String(unit.id ?? normalizeCode(unit.code));
       const candidates = [unit.title, ...(Array.isArray(unit.aliases) ? unit.aliases : [])]
@@ -307,17 +317,28 @@ ai.post('/analyze', async (c) => {
   // Keep the AI candidate query small, but scan the complete registry for code mentions.
   const scanRows = await sql`
     SELECT u.id, u.code, u.code_display, u.title,
-      COALESCE((SELECT array_agg(a.alias) FROM unit_aliases a WHERE a.unit_id=u.id), ARRAY[]::text[]) AS aliases
+      COALESCE(a.aliases, ARRAY[]::text[]) AS aliases
     FROM units u
+    LEFT JOIN (
+      SELECT unit_id, array_agg(alias ORDER BY alias) AS aliases
+      FROM unit_aliases GROUP BY unit_id
+    ) a ON a.unit_id = u.id
     ORDER BY u.code, u.title
   `;
   const allKnown = scanRows.map((u) => ({
     id: u.id, code: u.code_display || u.code, code_display: u.code_display || u.code,
     normalized_code: normalizeCode(u.code), title: u.title, aliases: u.aliases || []
   }));
+  const unitsByNormalizedCode = new Map();
+  for (const unit of allKnown) {
+    const code = normalizeCode(unit.code);
+    if (!code) continue;
+    if (!unitsByNormalizedCode.has(code)) unitsByNormalizedCode.set(code, []);
+    unitsByNormalizedCode.get(code).push(unit);
+  }
   let suggestion = null;
   let provider = 'rules-fallback';
-  const publicAiEnabled = String(c.env.AI_PUBLIC_ENABLED || 'false').toLowerCase() === 'true';
+  const publicAiEnabled = String(c.env.AI_PUBLIC_ENABLED || 'false').trim().toLowerCase() === 'true';
   console.info('AI analyze diagnostics', {
   aiBindingAvailable: Boolean(c.env.AI),
   publicAiEnabled,
@@ -333,14 +354,14 @@ ai.post('/analyze', async (c) => {
           { role: 'user', content: prompt },
         ],
         max_tokens: 1200,
-        ...(String(c.env.AI_JSON_MODE || 'false').toLowerCase() === 'true'
+        ...(String(c.env.AI_JSON_MODE || 'false').trim().toLowerCase() === 'true'
           ? { response_format: { type: 'json_object' } }
           : {}),
       });
-      const output =
-  result?.response ?? result?.output_text ?? result?.result ?? '';
-
-suggestion = parseJson(output);
+      const output = result?.response ?? result?.output_text ?? result?.result ?? '';
+      suggestion = output && typeof output === 'object' && !Array.isArray(output)
+        ? output
+        : parseJson(output);
 
 if (suggestion) {
   provider = 'cloudflare-workers-ai';
@@ -360,7 +381,7 @@ if (suggestion) {
   }
   if (!suggestion) suggestion = fallbackAnalysis({ text, filename, registry: allKnown });
 
-  const mentionedUnits = detectUnitCodeMentions(`${filename}\\n${text}`, allKnown);
+  const mentionedUnits = detectUnitCodeMentions(`${filename}\n${text}`, allKnown);
   const modelDetected = Array.isArray(suggestion.detected_units) ? suggestion.detected_units : [];
   const mergedDetected = [];
   const seenDetected = new Set();
@@ -376,10 +397,26 @@ if (suggestion) {
     seenDetected.add(key);
     mergedDetected.push({ id: matchedUnit.id, code: matchedUnit.code, title: matchedUnit.title });
   }
-  // Keep the AI-selected primary if verified; otherwise use the first detected registry unit.
+  const mentionedCodeSet = new Set(mentionedUnits.map((unit) => normalizeCode(unit.code)));
+  const registryAmbiguities = [...unitsByNormalizedCode.entries()]
+    .filter(([code, candidates]) => candidates.length > 1 && mentionedCodeSet.has(code))
+    .map(([code, candidates]) => ({
+      code,
+      candidates: candidates.map(({ id, code: displayCode, title }) => ({ id, code: displayCode, title })),
+    }));
+  const uniqueDetectedCodes = new Set(mergedDetected.map((unit) => normalizeCode(unit.code)));
+  const isMultiUnitDocument = uniqueDetectedCodes.size > 1;
+  // Prefer a verified AI-selected unit; if the model omitted or hallucinated
+  // its primary code, fall back to the first unit independently verified in
+  // the full registry scan. Unknown AI codes never override verified evidence.
   const rawCode = suggestion.unit_code ? normalizeCode(suggestion.unit_code) : '';
-  const [matchedRow] = rawCode ? await sql`SELECT id, code_display AS code, title FROM units WHERE code=${rawCode} ORDER BY id LIMIT 1` : [null];
-  const matched = matchedRow || allKnown.find((u) => normalizeCode(u.code) === rawCode);
+  const matchedByModel = rawCode
+    ? allKnown.find((u) => normalizeCode(u.code) === rawCode) || null
+    : null;
+  const fallbackPrimary = mergedDetected[0] || null;
+  const matched = matchedByModel || (fallbackPrimary
+    ? allKnown.find((u) => String(u.id) === String(fallbackPrimary.id)) || fallbackPrimary
+    : null);
   const rawType = ['notes','cat','exam','assignment','other'].includes(suggestion.type) ? suggestion.type : 'other';
   const year = Number.isInteger(Number(suggestion.academic_year)) && Number(suggestion.academic_year) >= 1900 && Number(suggestion.academic_year) <= 2100
     ? Number(suggestion.academic_year) : null;
@@ -392,22 +429,24 @@ if (suggestion) {
       unit_code: matched?.code || null,
       unit_title: matched?.title || null,
       unit_code_verified: Boolean(matched),
-      unverified_code_candidate: !matched && rawCode ? String(suggestion.unit_code).slice(0,40) : null,
+      unverified_code_candidate: rawCode && !matchedByModel ? String(suggestion.unit_code).slice(0,40) : null,
       type: rawType,
       academic_year: year,
       display_title: String(suggestion.display_title || filename.replace(/\.[^.]+$/, '') || 'Untitled document').slice(0,200),
       topics: Array.isArray(suggestion.topics) ? [...new Set(suggestion.topics.map((t) => String(t).trim().slice(0,120)).filter(Boolean))].slice(0,30) : [],
       confidence,
-      reason: String(suggestion.reason || 'Review this suggestion before applying it.').slice(0,500),
+      reason: String(registryAmbiguities.length ? `Registry has conflicting titles for ${registryAmbiguities.map((x) => x.code).join(', ')}; review the unit match. ${suggestion.reason || ''}` : (isMultiUnitDocument && !/multiple/i.test(String(suggestion.reason || '')) ? `Document appears to contain multiple units: ${mergedDetected.map((x) => x.code).join(', ')}. Manual review required. ${suggestion.reason || ''}` : (suggestion.reason || 'Review this suggestion before applying it.'))).slice(0,500),
       segments,
       detected_units: mergedDetected,
-      is_multi_unit_document: mergedDetected.length > 1,
-      requires_review: confidence < 0.8 || !matched || segments.length > 0 || mergedDetected.length > 1,
+      registry_ambiguities: registryAmbiguities,
+      is_multi_unit_document: isMultiUnitDocument,
+      requires_review: confidence < 0.8 || !matched || segments.length > 0 || isMultiUnitDocument || registryAmbiguities.length > 0,
       provider,
     },
     detected_units: mergedDetected,
-    is_multi_unit_document: mergedDetected.length > 1,
-    registry_matches: allKnown.filter((u) => rawCode && normalizeCode(u.code) === rawCode).slice(0,3).map(({id,code,title})=>({id,code,title})),
+    registry_ambiguities: registryAmbiguities,
+    is_multi_unit_document: isMultiUnitDocument,
+    registry_matches: mergedDetected.map(({id,code,title})=>({id,code,title})),
     disclaimer: 'Metadata is a suggestion only. Confirm unit and page boundaries before saving or splitting files.',
   });
 });
@@ -418,6 +457,7 @@ if (suggestion) {
  * physically split the original PDF; it creates a reviewable page-range plan.
  */
 ai.get('/segments/:resourceId', async (c) => {
+  if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
   const id = c.req.param('resourceId');
   if (!/^\d+$/.test(id)) return c.json({ error: 'invalid resource id' }, 400);
   const sql = await getDb(c.env);
@@ -471,7 +511,10 @@ function objectKeyFromProxyUrl(value) {
   try { return decodeURIComponent(raw.slice(i + marker.length).split('?')[0]); } catch { return null; }
 }
 
-async function getResourcePdf(sql, storage, resourceId) {
+const MAX_PDF_PROCESSING_BYTES = 15 * 1024 * 1024;
+const MAX_MERGE_SOURCES = 5;
+
+async function getResourcePdfMetadata(sql, storage, resourceId) {
   const [resource] = await sql`SELECT * FROM resources WHERE id=${resourceId} AND is_flagged=false`;
   if (!resource) throw new Error('resource not found or not available');
   let key = objectKeyFromProxyUrl(resource.combined_pdf_url);
@@ -483,16 +526,40 @@ async function getResourcePdf(sql, storage, resourceId) {
     key = objectKeyFromProxyUrl(files[0].file_url);
   }
   if (!key) throw new Error('source file is not stored behind the Communitylib file proxy');
-  const bytes = await storage.getObject(key);
-  if (bytes.byteLength > 100 * 1024 * 1024) throw new Error('PDF exceeds the 100 MB processing limit');
+
+  // HEAD before GET: reject oversized objects before buffering them into
+  // Worker memory. A missing/unknown content length fails closed.
+  const head = await storage.headObject(key);
+  if (!head.exists) throw new Error('source PDF not found in storage');
+  if (!Number.isFinite(head.contentLength)) throw new Error('source PDF size could not be verified');
+  if (head.contentLength > MAX_PDF_PROCESSING_BYTES) {
+    throw new Error('PDF exceeds the 15 MB processing limit');
+  }
+  return { resource, key, contentLength: head.contentLength };
+}
+
+async function loadResourcePdf(storage, metadata) {
+  const bytes = await storage.getObject(metadata.key);
+  if (bytes.byteLength > MAX_PDF_PROCESSING_BYTES) {
+    throw new Error('PDF exceeds the 15 MB processing limit');
+  }
   let pdf;
-  try { pdf = await PDFDocument.load(bytes); } catch { throw new Error('source PDF is corrupt, password-protected, or unsupported'); }
-  return { resource, bytes, pdf, key };
+  try { pdf = await PDFDocument.load(bytes); }
+  catch { throw new Error('source PDF is corrupt, password-protected, or unsupported'); }
+  return { ...metadata, bytes, pdf };
+}
+
+async function getResourcePdf(sql, storage, resourceId) {
+  const metadata = await getResourcePdfMetadata(sql, storage, resourceId);
+  return loadResourcePdf(storage, metadata);
 }
 
 /** Admin-only physical PDF splitting. Original source remains untouched. */
 ai.post('/split/:resourceId', async (c) => {
   if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  if (String(c.env.PDF_PROCESSING_ENABLED || 'false').trim().toLowerCase() !== 'true') {
+    return c.json({ error: 'pdf_processing_disabled', message: 'Synchronous PDF processing is disabled until the Worker CPU plan is confirmed or processing is moved off-request.' }, 503);
+  }
   const resourceId = c.req.param('resourceId');
   if (!/^\d+$/.test(resourceId)) return c.json({ error: 'invalid resource id' }, 400);
   let body;
@@ -504,7 +571,11 @@ ai.post('/split/:resourceId', async (c) => {
   const storage = getStorage(c.env);
   let source;
   try { source = await getResourcePdf(sql, storage, resourceId); }
-  catch (err) { return c.json({ error: err.message }, err.message === 'resource not found or not available' ? 404 : 400); }
+  catch (err) {
+    const status = err.message === 'resource not found or not available' ? 404
+      : /processing limit/.test(err.message) ? 413 : 400;
+    return c.json({ error: err.message }, status);
+  }
   const pageCount = source.pdf.getPageCount();
   const boundaryErrors = validateSegmentBoundaries(body.segments, pageCount);
   if (boundaryErrors.length) {
@@ -530,6 +601,7 @@ ai.post('/split/:resourceId', async (c) => {
     return c.json({ error: 'segment page ranges overlap; adjust them before splitting' }, 400);
   }
   const uploaded = [];
+  let totalGeneratedBytes = 0;
   const previousGenerated = await sql`
     SELECT segment_index, generated_file_key
     FROM document_segments
@@ -542,6 +614,10 @@ ai.post('/split/:resourceId', async (c) => {
       const pages = await output.copyPages(source.pdf, indices);
       for (const page of pages) output.addPage(page);
       const bytes = await output.save();
+      totalGeneratedBytes += bytes.byteLength;
+      if (bytes.byteLength > MAX_PDF_PROCESSING_BYTES || totalGeneratedBytes > 25 * 1024 * 1024) {
+        throw new Error('generated segments exceed the 25 MB total output limit');
+      }
       const key = `units/${r.unit_id}/derived/${crypto.randomUUID()}-pages-${r.start}-${r.end}.pdf`;
       const stored = await storage.putObject(key, bytes, 'application/pdf');
       uploaded.push({ ...r, key, url: stored.url, bytes: bytes.byteLength, hash: await sha256Hex(bytes) });
@@ -576,7 +652,9 @@ ai.post('/split/:resourceId', async (c) => {
   } catch (err) {
     await Promise.allSettled(uploaded.map((r)=>storage.deleteObject(r.key)));
     console.error('PDF split failed', err?.message || String(err));
-    return c.json({ error: 'PDF split failed; generated objects were cleaned up where possible', detail: err?.message || String(err) }, 500);
+    const message = err?.message || String(err);
+    return c.json({ error: 'PDF split failed; generated objects were cleaned up where possible', detail: message },
+      /processing limit|total output limit/.test(message) ? 413 : 500);
   }
 
   // Remove stale generated rows if this re-split now has fewer segments.
@@ -735,23 +813,37 @@ ai.post('/publish-segments/:resourceId', async (c) => {
 /** Admin-only PDF merge for resources from the same unit and same resource type. */
 ai.post('/merge', async (c) => {
   if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  if (String(c.env.PDF_PROCESSING_ENABLED || 'false').trim().toLowerCase() !== 'true') {
+    return c.json({ error: 'pdf_processing_disabled', message: 'Synchronous PDF processing is disabled until the Worker CPU plan is confirmed or processing is moved off-request.' }, 503);
+  }
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'valid JSON body required' }, 400); }
   const ids = Array.isArray(body.resource_ids) ? [...new Set(body.resource_ids.map(String))] : [];
-  if (ids.length < 2 || ids.length > 20 || ids.some((id)=>!/^\d+$/.test(id))) {
-    return c.json({ error: 'resource_ids must contain 2-20 valid resource IDs' }, 400);
+  if (ids.length < 2 || ids.length > MAX_MERGE_SOURCES || ids.some((id)=>!/^\d+$/.test(id))) {
+    return c.json({ error: 'resource_ids must contain 2-5 valid resource IDs' }, 400);
   }
   const sql = await getDb(c.env);
   const storage = getStorage(c.env);
   const loaded = [];
   try {
+    // Preflight every source with HEAD before downloading any PDF. This
+    // bounds total memory amplification instead of discovering limits late.
+    const metadata = [];
+    let totalSourceBytes = 0;
     for (const id of ids) {
-      loaded.push(await getResourcePdf(sql, storage, id));
-      if (loaded.reduce((sum,item)=>sum+item.bytes.byteLength,0) > 100 * 1024 * 1024) {
-        return c.json({ error: 'combined source PDFs exceed the 100 MB total processing limit' }, 413);
+      const item = await getResourcePdfMetadata(sql, storage, id);
+      metadata.push(item);
+      totalSourceBytes += item.contentLength;
+      if (totalSourceBytes > MAX_PDF_PROCESSING_BYTES) {
+        return c.json({ error: 'combined source PDFs exceed the 15 MB total processing limit' }, 413);
       }
     }
-  } catch (err) { return c.json({ error: err.message }, err.message === 'resource not found or not available' ? 404 : 400); }
+    for (const item of metadata) loaded.push(await loadResourcePdf(storage, item));
+  } catch (err) {
+    const status = err.message === 'resource not found or not available' ? 404
+      : /processing limit/.test(err.message) ? 413 : 400;
+    return c.json({ error: err.message }, status);
+  }
   const first = loaded[0].resource;
   if (loaded.some((x)=>String(x.resource.unit_id)!==String(first.unit_id) || x.resource.type!==first.type)) {
     return c.json({ error: 'merge only supports resources with the same unit and resource type' }, 400);
@@ -767,7 +859,7 @@ ai.post('/merge', async (c) => {
       if (totalPages > 1000) return c.json({ error: 'merged PDF exceeds 1000 pages' }, 413);
     }
     const bytes = await merged.save();
-    if (bytes.byteLength > 100 * 1024 * 1024) return c.json({ error: 'merged PDF exceeds 100 MB' }, 413);
+    if (bytes.byteLength > MAX_PDF_PROCESSING_BYTES) return c.json({ error: 'merged PDF exceeds the 15 MB processing limit' }, 413);
     const hash = await sha256Hex(bytes);
     const [duplicate] = await sql`SELECT id FROM resource_files WHERE file_hash=${hash} LIMIT 1`;
     if (duplicate) return c.json({ error: 'merged PDF already exists', existing_file_id: duplicate.id }, 409);
