@@ -4,6 +4,10 @@ import { normalizeCode, normalizeText } from '../utils/hash.js';
 
 const search = new Hono();
 
+function escapeLike(value) {
+  return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
 /**
  * GET /api/search/suggest?q=mat2
  * Fast, lightweight autocomplete - returns up to 8 matching units as the
@@ -15,21 +19,25 @@ search.get('/suggest', async (c) => {
 
   const sql = await getDb(c.env);
   const codeLike = normalizeCode(q);
+  const escapedCodeLike = escapeLike(codeLike);
+  const escapedQ = escapeLike(q);
+  const escapedNormalizedQ = escapeLike(normalizeText(q));
 
   const rows = await sql`
     SELECT id, code_display, title, resource_count
     FROM units
-    WHERE code ILIKE ${codeLike + '%'}
-       OR title ILIKE ${'%' + q + '%'}
-       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + q + '%'} OR a.normalized_alias ILIKE ${'%' + normalizeText(q) + '%'}))
+    WHERE code ILIKE ${escapedCodeLike + '%'}
+       OR title ILIKE ${'%' + escapedQ + '%'}
+       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + escapedQ + '%'} OR a.normalized_alias ILIKE ${'%' + escapedNormalizedQ + '%'}))
        OR similarity(title, ${q}) > 0.2
        OR EXISTS (
-         SELECT 1 FROM resources r, unnest(r.topics) AS topic
-         WHERE r.unit_id = units.id AND r.is_flagged = false
-           AND (topic ILIKE ${'%' + q + '%'} OR similarity(topic, ${q}) > 0.2)
+         SELECT 1 FROM resource_topics rt
+         JOIN resources r ON r.id=rt.resource_id
+         WHERE rt.unit_id = units.id AND r.is_flagged = false
+           AND (rt.topic ILIKE ${'%' + escapedQ + '%'} OR similarity(rt.topic, ${q}) > 0.2)
        )
     ORDER BY
-      (code ILIKE ${codeLike + '%'}) DESC,   -- exact code prefix first
+      (code ILIKE ${escapedCodeLike + '%'}) DESC,   -- exact code prefix first
       resource_count DESC
     LIMIT 8
   `;
@@ -57,29 +65,34 @@ search.get('/', async (c) => {
 
   const sql = await getDb(c.env);
   const codeLike = normalizeCode(q);
+  const escapedCodeLike = escapeLike(codeLike);
+  const escapedQ = escapeLike(q);
+  const escapedNormalizedQ = escapeLike(normalizeText(q));
 
   const units = await sql`
     SELECT *,
-      (code ILIKE ${codeLike + '%'}) AS code_match,
+      (code ILIKE ${escapedCodeLike + '%'}) AS code_match,
       GREATEST(
         similarity(title, ${q}),
         similarity(code_display, ${q}),
         COALESCE((SELECT MAX(similarity(a.alias, ${q})) FROM unit_aliases a WHERE a.unit_id=units.id), 0),
         COALESCE((
-          SELECT MAX(similarity(topic, ${q}))
-          FROM resources r, unnest(r.topics) AS topic
-          WHERE r.unit_id = units.id AND r.is_flagged = false
+          SELECT MAX(similarity(rt.topic, ${q}))
+          FROM resource_topics rt
+          JOIN resources r ON r.id=rt.resource_id
+          WHERE rt.unit_id = units.id AND r.is_flagged = false
         ), 0)
       ) AS rank
     FROM units
-    WHERE code ILIKE ${'%' + codeLike + '%'}
-       OR title ILIKE ${'%' + q + '%'}
-       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + q + '%'} OR a.normalized_alias ILIKE ${'%' + normalizeText(q) + '%'}))
+    WHERE code ILIKE ${'%' + escapedCodeLike + '%'}
+       OR title ILIKE ${'%' + escapedQ + '%'}
+       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + escapedQ + '%'} OR a.normalized_alias ILIKE ${'%' + escapedNormalizedQ + '%'}))
        OR similarity(title, ${q}) > 0.15
        OR EXISTS (
-         SELECT 1 FROM resources r, unnest(r.topics) AS topic
-         WHERE r.unit_id = units.id AND r.is_flagged = false
-           AND (topic ILIKE ${'%' + q + '%'} OR similarity(topic, ${q}) > 0.15)
+         SELECT 1 FROM resource_topics rt
+         JOIN resources r ON r.id=rt.resource_id
+         WHERE rt.unit_id = units.id AND r.is_flagged = false
+           AND (rt.topic ILIKE ${'%' + escapedQ + '%'} OR similarity(rt.topic, ${q}) > 0.15)
        )
     ORDER BY code_match DESC, rank DESC, resource_count DESC
     LIMIT 20
