@@ -31,6 +31,9 @@ ai.use('*', async (c, next) => {
     binding = c.env.AI_CLASSIFY_LIMITER;
   } else if (
     path === '/registry/import' ||
+    path === '/extract-text' ||
+    path === '/apply-metadata' ||
+    path === '/study' ||
     path === '/segments' ||
     /^\/segments\/\d+$/.test(path) ||
     /^\/split\/\d+$/.test(path) ||
@@ -159,6 +162,41 @@ function fallbackAnalysis({ text, filename, registry }) {
     provider: 'rules-fallback',
   };
 }
+
+/**
+ * GET /api/ai/tools
+ * Machine-readable inventory of the library agent's tools and approval levels.
+ * This endpoint only describes capabilities; it does not execute them.
+ */
+ai.get('/tools', (c) => c.json({
+  name: 'Communitylib Library Agent',
+  version: '1.0.0',
+  execution_model: 'explicit tool calls; no destructive action is automatic',
+  tools: [
+    { name: 'registry_search', method: 'GET', path: '/api/ai/registry?q=', approval: 'read', description: 'Search verified unit codes, titles, aliases and provenance.' },
+    { name: 'resource_inspect', method: 'GET', path: '/api/resource/:id', approval: 'read', description: 'Read resource metadata and attached files.' },
+    { name: 'resource_preview', method: 'GET', path: '/api/resource/:id/preview', approval: 'read', description: 'Read preview, snippet and page-count status.' },
+    { name: 'library_search', method: 'GET', path: '/api/search?q=', approval: 'read', description: 'Search units and their grouped resources.' },
+    { name: 'pdf_extract_text', method: 'POST', path: '/api/ai/extract-text', approval: 'admin', description: 'Persist page text extracted client-side by PDF.js; updates page count and snippet.' },
+    { name: 'document_analyze', method: 'POST', path: '/api/ai/analyze', approval: 'review', description: 'Suggest unit, document type, year, topics and possible segments from supplied text.' },
+    { name: 'metadata_apply', method: 'POST', path: '/api/ai/apply-metadata', approval: 'admin_explicit', description: 'Apply metadata only after a human has reviewed the verified unit match and title.' },
+    { name: 'segment_list', method: 'GET', path: '/api/ai/segments/:resourceId', approval: 'admin', description: 'Read saved page-range suggestions.' },
+    { name: 'segment_save', method: 'POST', path: '/api/ai/segments', approval: 'admin', description: 'Save reviewed page-range suggestions without modifying the original.' },
+    { name: 'pdf_split', method: 'POST', path: '/api/ai/split/:resourceId', approval: 'admin_and_enabled_processing', description: 'Create derived PDFs for approved page ranges; preserves the source.' },
+    { name: 'publish_segments', method: 'POST', path: '/api/ai/publish-segments/:resourceId', approval: 'admin_explicit', description: 'Publish generated segments as library resources.' },
+    { name: 'pdf_merge', method: 'POST', path: '/api/ai/merge', approval: 'admin_and_enabled_processing', description: 'Merge selected PDFs that belong to the same unit and resource type.' },
+    { name: 'processing_jobs', method: 'GET', path: '/api/ai/jobs', approval: 'admin', description: 'Inspect processing job records.' },
+    { name: 'study_assistant', method: 'POST', path: '/api/ai/study', approval: 'admin', description: 'Answer a question or create a summary, flashcards or quiz from extracted resource text.' },
+  ],
+  safety: {
+    source_preservation: true,
+    suggestions_require_review: true,
+    publish_requires_explicit_call: true,
+    automatic_page_boundaries: 'never assumed; use page markers and review confidence',
+    server_side_pdf_extraction: false,
+    pdf_extraction_mode: 'browser PDF.js extracts text, then sends bounded page text to the protected API',
+  },
+}));
 
 /**
  * GET /api/ai/registry?q=...
@@ -449,6 +487,161 @@ if (suggestion) {
     registry_matches: mergedDetected.map(({id,code,title})=>({id,code,title})),
     disclaimer: 'Metadata is a suggestion only. Confirm unit and page boundaries before saving or splitting files.',
   });
+});
+
+/**
+ * POST /api/ai/extract-text
+ * Receives text extracted in the user's browser by PDF.js. The Worker does not
+ * buffer/parse the 20+ MB PDF itself, avoiding the 128 MB Worker memory cliff.
+ * Body: {resource_id, page_count, pages:[{page_number,text}]}
+ */
+ai.post('/extract-text', async (c) => {
+  if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'valid JSON body required' }, 400); }
+  const resourceId = String(body.resource_id || '');
+  const pageCount = Number(body.page_count);
+  if (!/^\d+$/.test(resourceId) || !Number.isInteger(pageCount) || pageCount < 1 || pageCount > 1000 || !Array.isArray(body.pages)) {
+    return c.json({ error: 'resource_id, valid page_count and pages are required' }, 400);
+  }
+  if (body.pages.length !== pageCount || body.pages.length > 1000) {
+    return c.json({ error: 'pages must contain exactly one entry per PDF page' }, 400);
+  }
+  let totalChars = 0;
+  const normalizedPages = [];
+  for (let i = 0; i < body.pages.length; i++) {
+    const page = body.pages[i] || {};
+    const number = Number(page.page_number);
+    if (number !== i + 1 || typeof page.text !== 'string') {
+      return c.json({ error: `pages[${i}] must contain page_number ${i + 1} and text` }, 400);
+    }
+    const text = page.text.replace(/\u0000/g, '').slice(0, 12000);
+    totalChars += text.length;
+    if (totalChars > 700000) {
+      return c.json({ error: 'extracted text exceeds the 700,000 character safety limit; extract smaller page batches' }, 413);
+    }
+    normalizedPages.push({ page_number: number, text });
+  }
+  const extractedText = normalizedPages.map((p) => `\n\n===== PAGE ${p.page_number} =====\n${p.text}`).join('').trim();
+  if (!extractedText.trim()) return c.json({ error: 'PDF contains no extractable text; it may be scanned and require OCR' }, 422);
+  const sql = await getDb(c.env);
+  const [resource] = await sql`SELECT id, is_flagged FROM resources WHERE id=${resourceId}`;
+  if (!resource || resource.is_flagged) return c.json({ error: 'resource not found or unavailable' }, 404);
+  const files = await sql`SELECT id, file_ext FROM resource_files WHERE resource_id=${resourceId} ORDER BY order_index`;
+  const pdfFiles = files.filter((f) => String(f.file_ext || '').toLowerCase() === 'pdf');
+  if (pdfFiles.length !== 1 || files.length !== 1) {
+    return c.json({ error: 'browser extraction currently requires a resource containing exactly one PDF file; process multi-file resources individually' }, 409);
+  }
+  const snippet = extractedText.replace(/\s+/g, ' ').trim().slice(0, 360);
+  await sql.transaction([
+    sql`UPDATE resources SET extracted_text=${extractedText}, preview_snippet=${snippet}, processing_status='ready' WHERE id=${resourceId}`,
+    sql`UPDATE resource_files SET page_count=${pageCount}, processing_status='ready' WHERE resource_id=${resourceId} AND lower(file_ext)='pdf'`,
+    sql`INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details) VALUES('pdf_text_extracted','admin','resource',${resourceId},${JSON.stringify({page_count:pageCount,character_count:extractedText.length,extractor:'browser-pdfjs'})}::jsonb)`,
+  ]);
+  return c.json({
+    ok: true, resource_id: resourceId, page_count: pageCount,
+    character_count: extractedText.length, preview_snippet: snippet,
+    page_markers_preserved: true,
+    next_step: 'POST the extracted text to /api/ai/analyze for unit classification. Review all suggested page boundaries before saving or splitting.',
+  });
+});
+
+/**
+ * POST /api/ai/apply-metadata
+ * Explicitly apply a reviewed classifier suggestion. Unit IDs/codes are
+ * re-verified against the registry; this route never accepts unknown codes.
+ */
+ai.post('/apply-metadata', async (c) => {
+  if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'valid JSON body required' }, 400); }
+  const resourceId = String(body.resource_id || '');
+  const suggestion = body.suggestion || {};
+  if (!/^\d+$/.test(resourceId)) return c.json({ error: 'valid resource_id is required' }, 400);
+  const type = String(suggestion.type || 'notes').toLowerCase();
+  if (!['notes','cat','exam','assignment','other'].includes(type)) return c.json({ error: 'invalid resource type' }, 400);
+  const title = String(suggestion.display_title || '').trim().slice(0,200);
+  if (!title) return c.json({ error: 'reviewed display_title is required' }, 400);
+  const code = normalizeCode(suggestion.unit_code || '');
+  if (!code) return c.json({ error: 'a verified unit_code is required' }, 400);
+  const year = suggestion.academic_year == null || suggestion.academic_year === '' ? null : Number(suggestion.academic_year);
+  if (year != null && (!Number.isInteger(year) || year < 1900 || year > 2100)) return c.json({ error: 'academic_year must be null or a year from 1900 to 2100' }, 400);
+  const topics = Array.isArray(suggestion.topics)
+    ? [...new Set(suggestion.topics.map((x) => String(x).trim().slice(0,120)).filter(Boolean))].slice(0,30)
+    : [];
+  const sql = await getDb(c.env);
+  const requestedUnitId = String(suggestion.unit_id || '');
+  let matches;
+  if (requestedUnitId && /^\d+$/.test(requestedUnitId)) {
+    matches = await sql`SELECT id,code,code_display,title FROM units WHERE id=${requestedUnitId} AND code=${code} LIMIT 1`;
+  } else {
+    matches = await sql`SELECT id,code,code_display,title FROM units WHERE code=${code} ORDER BY id LIMIT 2`;
+  }
+  if (matches.length !== 1) return c.json({ error: matches.length ? 'unit code maps to multiple registry entries; provide the verified unit_id' : 'unit code or unit_id does not match the verified registry' }, 409);
+  const unit = matches[0];
+  const [resource] = await sql`SELECT id,unit_id,title,type FROM resources WHERE id=${resourceId} AND is_flagged=false`;
+  if (!resource) return c.json({ error: 'resource not found or unavailable' }, 404);
+  const confidence = clampConfidence(suggestion.confidence, 0.3);
+  if (String(resource.unit_id) !== String(unit.id)) {
+    await sql.transaction([
+      sql`UPDATE resources SET unit_id=${unit.id}, title=${title}, original_title=COALESCE(original_title,title),
+        type=${type}::resource_type, academic_year=${year}, topics=${topics}, metadata_confidence=${confidence} WHERE id=${resourceId}`,
+      sql`UPDATE units SET resource_count=GREATEST(0,resource_count-1) WHERE id=${resource.unit_id}`,
+      sql`UPDATE units SET resource_count=resource_count+1 WHERE id=${unit.id}`,
+    ]);
+  } else {
+    await sql`UPDATE resources SET title=${title}, original_title=COALESCE(original_title,title),
+      type=${type}::resource_type, academic_year=${year}, topics=${topics}, metadata_confidence=${confidence} WHERE id=${resourceId}`;
+  }
+  const [updated] = await sql`SELECT id,unit_id,title,type,academic_year,topics,metadata_confidence FROM resources WHERE id=${resourceId}`;
+  await sql`INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details)
+    VALUES('metadata_applied','admin','resource',${resourceId},${JSON.stringify({unit_id:unit.id,unit_code:unit.code_display,type,academic_year:year,confidence})}::jsonb)`;
+  return c.json({ ok: true, resource: updated, verified_unit: unit, note: 'Reviewed metadata applied; source files were not changed.' });
+});
+
+/**
+ * POST /api/ai/study
+ * Bounded study tools backed only by text stored for a resource.
+ * Body: {resource_id, action: ask|summarize|flashcards|quiz, question?}
+ */
+ai.post('/study', async (c) => {
+  if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'valid JSON body required' }, 400); }
+  const resourceId = String(body.resource_id || '');
+  const action = String(body.action || '').toLowerCase();
+  const allowed = new Set(['ask', 'summarize', 'flashcards', 'quiz']);
+  if (!/^\d+$/.test(resourceId) || !allowed.has(action)) {
+    return c.json({ error: 'resource_id and action (ask|summarize|flashcards|quiz) are required' }, 400);
+  }
+  if (action === 'ask' && !String(body.question || '').trim()) return c.json({ error: 'question is required for ask' }, 400);
+  const sql = await getDb(c.env);
+  const [resource] = await sql`SELECT id,title,extracted_text FROM resources WHERE id=${resourceId} AND is_flagged=false`;
+  if (!resource) return c.json({ error: 'resource not found' }, 404);
+  const sourceText = String(resource.extracted_text || '').slice(0, MAX_TEXT);
+  if (!sourceText.trim()) return c.json({ error: 'no extracted text is stored; run browser PDF extraction first' }, 409);
+  if (!c.env.AI) return c.json({ error: 'Workers AI binding is unavailable' }, 503);
+  const task = action === 'ask'
+    ? `Answer the student's question using only the source. If unsupported, say the notes do not establish it. Cite page markers such as PAGE 3 when available. Question: ${String(body.question).slice(0,1200)}`
+    : action === 'summarize'
+      ? 'Create a structured study summary: key ideas, definitions, formulas, worked-process steps, and common confusions. Cite page markers where possible.'
+      : action === 'flashcards'
+        ? 'Create 8-15 useful question-answer flashcards from the source. Return JSON array of objects with question and answer. Do not invent facts.'
+        : 'Create 8-12 exam-style questions based only on the source. Return JSON with questions array; each item has question, options (for multiple choice), answer, and explanation. Mix conceptual and calculation questions when the source supports them.';
+  try {
+    const result = await c.env.AI.run(c.env.AI_MODEL || MODEL, {
+      messages: [
+        { role: 'system', content: 'You are Communitylib Study Assistant. Use only the provided course notes. Do not fabricate facts, formulas, quotations, or page references. If evidence is missing, state that clearly.' },
+        { role: 'user', content: `Resource: ${String(resource.title || 'Untitled').slice(0,200)}\nTask: ${task}\nSOURCE TEXT (may be truncated):\n${sourceText}` },
+      ],
+      max_tokens: action === 'summarize' ? 1800 : 1400,
+    });
+    const output = result?.response ?? result?.output_text ?? result?.result ?? result;
+    return c.json({ ok: true, resource_id: resourceId, title: resource.title, action, provider: 'cloudflare-workers-ai', result: typeof output === 'string' ? output : JSON.stringify(output), source_truncated: String(resource.extracted_text).length > MAX_TEXT });
+  } catch (err) {
+    console.error('study tool failed', err?.message || String(err));
+    return c.json({ error: 'study tool failed', detail: 'Workers AI could not complete this request' }, 502);
+  }
 });
 
 /**
