@@ -13,8 +13,8 @@ compatibility_flags = ["nodejs_compat"]
 #   B2_BUCKET            Backblaze B2 bucket name
 #   B2_ENDPOINT          e.g. https://s3.eu-central-003.backblazeb2.com
 #   B2_REGION            e.g. eu-central-003
-#   B2_PUBLIC_BASE_URL   Public/CDN base url used to build download links
-#   DEBUG_KEY            optional — see "Debugging without a CLI" in README
+#   DEBUG_KEY            optional — send only in X-Debug-Key header
+#   ADMIN_API_KEY         required secret for admin AI/registry/PDF endpoints
 #
 # IMPORTANT: secrets are attached to the exact Worker script name above
 # ("communitylib"). If this project is ever renamed here, every secret
@@ -23,12 +23,14 @@ compatibility_flags = ["nodejs_compat"]
 # that deploys fine but returns 503 on everything DB/storage related.
 
 [vars]
-MAX_FILE_SIZE_MB = "50"
+MAX_FILE_SIZE_MB = "25"
 MAX_FILES_PER_UPLOAD = "20"
-MAX_TOTAL_UPLOAD_MB = "100"
-APP_VERSION = "4.0.0"
-AI_PUBLIC_ENABLED = "true"
-AI_MODEL = "@cf/meta/llama-3.2-3b-instruct"
+MAX_TOTAL_UPLOAD_MB = "25"
+APP_VERSION = "4.1.0"
+AI_PUBLIC_ENABLED = "false"
+PDF_PROCESSING_ENABLED = "false"
+IMAGE_PDF_COMBINE_ENABLED = "false"
+AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
 APP_NAME = "University of Eldoret Student Resources"
 
 # No [[routes]] block: this deploys to the default *.workers.dev subdomain.
@@ -40,7 +42,7 @@ APP_NAME = "University of Eldoret Student Resources"
 [observability]
 enabled = true
 head_sampling_rate = 1
-redact_query_string = false
+redact_query_string = true
 
 [observability.logs]
 enabled = true
@@ -72,3 +74,26 @@ simple = { limit = 20, period = 60 }
 name = "AI_ADMIN_LIMITER"
 namespace_id = "1003"
 simple = { limit = 10, period = 60 }
+
+# Public API abuse controls. Limits are per Cloudflare client IP; campus NAT
+# users share a bucket, so monitor 429 rates and tune if needed. Periods use
+# Cloudflare's supported 60-second window.
+[[ratelimits]]
+name = "PUBLIC_UPLOAD_LIMITER"
+namespace_id = "2001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "PUBLIC_COMMENT_LIMITER"
+namespace_id = "2002"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "PUBLIC_SEARCH_LIMITER"
+namespace_id = "2003"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "PUBLIC_FILE_LIMITER"
+namespace_id = "2004"
+simple = { limit = 120, period = 60 }
