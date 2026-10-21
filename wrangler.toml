@@ -55,3 +55,14 @@ head_sampling_rate = 1
 # Optional Workers AI binding. Enable Workers AI in the Cloudflare account.
 [ai]
 binding = "AI"
+
+# AI rate limits: initial per-client limits
+[[ratelimits]]
+name = "AI_CLASSIFY_LIMITER"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "AI_SEARCH_LIMITER"
+namespace_id = "1002"
+simple = { limit = 20, period = 60 }
