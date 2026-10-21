@@ -1,11 +1,12 @@
 {
   "name": "communitylib",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node --test"
   },
   "dependencies": {
     "hono": "^4.6.0",
@@ -14,6 +15,6 @@
     "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
-    "wrangler": "^3.90.0"
+    "wrangler": "^4.0.0"
   }
 }
