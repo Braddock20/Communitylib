@@ -52,3 +52,18 @@ test('validates page bounds, document length, and overlap before splitting', () 
   ], 6).some((e) => e.includes('overlap')));
   assert.ok(validateSegmentBoundaries([{ page_start: 4, page_end: 2 }], 6).length);
 });
+
+
+test('detects a unit code at the very start of text and after a filename seam', () => {
+  assert.deepEqual(detectUnitCodeMentions('PHY 121 notes begin here', registry).map((u) => u.id), [1]);
+  assert.deepEqual(detectUnitCodeMentions('Combined_Notes.pdf\nAGRI111 starts here', registry).map((u) => u.id), [2]);
+});
+
+test('detects both codes even when one is spaced and preserves first-mention order', () => {
+  const found = detectUnitCodeMentions('AGRI-111 then PHY121 then AGRI111 again', registry);
+  assert.deepEqual(found.map((u) => u.id), [2, 1]);
+});
+
+test('does not treat code-like words without a registry match as verified', () => {
+  assert.deepEqual(detectUnitCodeMentions('ZZZ999 unknown course code', registry), []);
+});
