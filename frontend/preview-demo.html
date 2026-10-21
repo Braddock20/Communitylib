@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Communitylib document preview demo</title>
+  <style>
+    :root{color-scheme:dark;--cl-text:#f3f4f6;--cl-border:#30333a;--cl-card:#17191e}
+    *{box-sizing:border-box}body{margin:0;background:#0c0d10;color:#f3f4f6;font:15px/1.5 system-ui,sans-serif}
+    main{max-width:760px;margin:0 auto;padding:28px 18px}h1{font-size:24px}p{color:#aeb4c0}
+    form{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}input,button{padding:12px;border:1px solid #393d47;border-radius:10px;background:#17191e;color:inherit}
+    input{flex:1;min-width:160px}button{cursor:pointer;background:#343943}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Communitylib · Document preview</h1>
+  <p>WhatsApp-style document card. Set your API base URL and a resource ID to test it.</p>
+  <form id="preview-form">
+    <input id="api" placeholder="API base URL (blank for same origin)" aria-label="API base URL">
+    <input id="id" type="number" min="1" placeholder="Resource ID" required aria-label="Resource ID">
+    <button>Load preview</button>
+  </form>
+  <communitylib-document-preview id="preview"></communitylib-document-preview>
+</main>
+<script type="module">
+  import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+  globalThis.pdfjsLib = pdfjsLib;
+  await import('./document-preview.js');
+  document.querySelector('#preview-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const old = document.querySelector('#preview');
+    const el = document.createElement('communitylib-document-preview');
+    el.id = 'preview';
+    el.setAttribute('resource-id', document.querySelector('#id').value);
+    const api = document.querySelector('#api').value.trim();
+    if (api) el.setAttribute('api-base', api);
+    old.replaceWith(el);
+  });
+</script>
+</body>
+</html>
