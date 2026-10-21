@@ -66,3 +66,8 @@ simple = { limit = 10, period = 60 }
 name = "AI_SEARCH_LIMITER"
 namespace_id = "1002"
 simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "AI_ADMIN_LIMITER"
+namespace_id = "1003"
+simple = { limit = 10, period = 60 }
