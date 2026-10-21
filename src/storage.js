@@ -19,7 +19,6 @@ function objectPath(key) {
 export function getStorage(env) {
   const endpoint = cleanBaseUrl(required(env, 'B2_ENDPOINT'));
   const bucket = required(env, 'B2_BUCKET');
-  const publicBase = cleanBaseUrl(env.B2_PUBLIC_BASE_URL || `${endpoint}/${encodeURIComponent(bucket)}`);
   const region = String(env.B2_REGION || 'us-west-000').trim();
 
   const client = new AwsClient({
@@ -59,6 +58,19 @@ export function getStorage(env) {
       }
     },
 
+    async headObject(key) {
+      const res = await client.fetch(urlForKey(key), { method: 'HEAD' });
+      if (res.status === 404) return { exists: false, contentLength: 0, contentType: null };
+      if (!res.ok) throw new Error(`B2 metadata fetch failed (${res.status})`);
+      const rawLength = res.headers.get('content-length');
+      const contentLength = rawLength == null ? null : Number(rawLength);
+      return {
+        exists: true,
+        contentLength: Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null,
+        contentType: res.headers.get('content-type'),
+      };
+    },
+
     async getObject(key) {
       const res = await client.fetch(urlForKey(key), { method: 'GET' });
       if (!res.ok) throw new Error(`B2 fetch failed (${res.status}) for ${key}`);
@@ -72,10 +84,6 @@ export function getStorage(env) {
     async fetchObject(key, range) {
       const headers = range ? { Range: range } : undefined;
       return client.fetch(urlForKey(key), { method: 'GET', headers });
-    },
-
-    publicUrl(key) {
-      return `${publicBase}/${objectPath(key)}`;
     },
   };
 }
