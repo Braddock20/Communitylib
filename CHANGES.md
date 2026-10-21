@@ -58,3 +58,12 @@ this API keeps working. Two concrete fixes and one workflow change:
 - Added reviewable PDF segment boundary storage, physical PDF splitting/merging, alias-aware unit search, and core tests.
 - Existing upload/download routes and B2 object keys remain compatible.
 - Limits: PDF text extraction/OCR, OCR and persistent server-rendered PDF thumbnails require additional processing services and are not falsely reported as implemented. PDF splitting/merging is implemented for supported PDFs through admin-only endpoints.
+
+
+## AI library reliability patch (2026-10-21)
+- Detect all explicit unit-code mentions across the full unit registry, including codes with spaces/hyphens.
+- Preserve backward-compatible analysis fields while adding `detected_units` and `is_multi_unit_document`.
+- Mark unsafe page-boundary suggestions for review; validate split boundaries and overlap before PDF extraction.
+- Add an admin-only, idempotent-by-content-hash endpoint to publish generated segments as ordinary library resources after review.
+- Align Wrangler `AI_MODEL` with the current configured production model; JSON response mode remains opt-in.
+- Add regression tests for code detection, invalid page boundaries, page-count checks, and overlap checks.
