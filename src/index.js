@@ -10,7 +10,31 @@ import files from './routes/files.js';
 import ai from './routes/ai.js';
 import { resolveDb } from './db.js';
 
+
 const app = new Hono();
+
+function limitedBy(bindingName) {
+  return async (c, next) => {
+    if (c.req.method === 'OPTIONS') return next();
+    const binding = c.env[bindingName];
+    const ip = c.req.header('cf-connecting-ip');
+    if (!binding || typeof binding.limit !== 'function' || !ip) {
+      console.error('public rate-limit binding or client IP unavailable', { bindingName });
+      return c.json({ error: 'rate_limit_unavailable' }, 503);
+    }
+    try {
+      const { success } = await binding.limit({ key: `ip:${ip}` });
+      if (!success) {
+        return c.json({ error: 'rate_limit_exceeded', retry_after_seconds: 60 }, 429,
+          { 'Retry-After': '60' });
+      }
+    } catch (err) {
+      console.error('public rate-limit check failed', { bindingName, message: err?.message || String(err) });
+      return c.json({ error: 'rate_limit_unavailable' }, 503);
+    }
+    await next();
+  };
+}
 
 app.use('*', async (c, next) => {
   const requestId = c.req.header('cf-ray') || crypto.randomUUID();
@@ -54,7 +78,7 @@ app.use(
 app.get('/', (c) => c.json({
   ok: true,
   app: c.env.APP_NAME || 'UoE Student Resources API',
-  version: c.env.APP_VERSION || '3.0.0',
+  version: c.env.APP_VERSION || '4.1.0',
 }));
 
 // Liveness: deliberately does not touch the database. If this 503s, the
@@ -66,14 +90,14 @@ app.get('/health', (c) => c.json({ ok: true }));
 //
 // Debugging without a CLI: set a DEBUG_KEY secret in the dashboard
 // (Settings -> Variables and Secrets), then visit
-//   /health/db?debug_key=YOUR_KEY
+//   /health/db with X-Debug-Key: YOUR_KEY
 // in a browser. That returns exactly which env var was tried, which host
 // it resolved to, and why each attempt failed — no `wrangler tail`, no
 // Logs tab needed. Leave DEBUG_KEY unset and the endpoint behaves exactly
 // like a normal generic {ok:false} readiness check.
 app.get('/health/db', async (c) => {
   const debugKey = c.env.DEBUG_KEY;
-  const providedKey = c.req.header('x-debug-key') || c.req.query('debug_key');
+  const providedKey = c.req.header('x-debug-key');
   const debugAllowed = Boolean(debugKey) && providedKey === debugKey;
 
   try {
@@ -92,6 +116,15 @@ app.get('/health/db', async (c) => {
   }
 });
 
+app.use('/api/upload', limitedBy('PUBLIC_UPLOAD_LIMITER'));
+app.use('/api/upload/*', limitedBy('PUBLIC_UPLOAD_LIMITER'));
+app.use('/api/search', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/search/*', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/feed', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/feed/*', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/files/*', limitedBy('PUBLIC_FILE_LIMITER'));
+app.use('/api/resource/:id/comments', limitedBy('PUBLIC_COMMENT_LIMITER'));
+
 app.route('/api/upload', upload);
 app.route('/api/search', search);
 app.route('/api/feed', feed);
@@ -108,12 +141,12 @@ app.onError((err, c) => {
 
   const body = { error: 'internal_server_error', message: 'Something went wrong. Please try again.' };
 
-  // Same opt-in mechanism as /health/db: append ?debug_key=YOUR_KEY (or an
-  // X-Debug-Key header) to see the real error instead of the generic
+  // Same opt-in mechanism as /health/db: send an X-Debug-Key header to
+  // see the real error instead of the generic
   // message. Never sent to a public client unless DEBUG_KEY is set AND
   // matched.
   const debugKey = c.env.DEBUG_KEY;
-  const providedKey = c.req.header('x-debug-key') || c.req.query('debug_key');
+  const providedKey = c.req.header('x-debug-key');
   if (debugKey && providedKey === debugKey) {
     body.debug = {
       message: err?.message || String(err),
