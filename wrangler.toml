@@ -26,7 +26,8 @@ compatibility_flags = ["nodejs_compat"]
 MAX_FILE_SIZE_MB = "50"
 MAX_FILES_PER_UPLOAD = "20"
 MAX_TOTAL_UPLOAD_MB = "100"
-APP_VERSION = "3.2.0"
+APP_VERSION = "4.0.0"
+AI_PUBLIC_ENABLED = "false"
 APP_NAME = "University of Eldoret Student Resources"
 
 # No [[routes]] block: this deploys to the default *.workers.dev subdomain.
@@ -50,3 +51,7 @@ invocation_logs = true
 enabled = true
 persist = true
 head_sampling_rate = 1
+
+# Optional Workers AI binding. Enable Workers AI in the Cloudflare account.
+[ai]
+binding = "AI"
