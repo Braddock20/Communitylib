@@ -270,6 +270,12 @@ ai.post('/analyze', async (c) => {
   let suggestion = null;
   let provider = 'rules-fallback';
   const publicAiEnabled = String(c.env.AI_PUBLIC_ENABLED || 'false').toLowerCase() === 'true';
+  console.info('AI analyze diagnostics', {
+  aiBindingAvailable: Boolean(c.env.AI),
+  publicAiEnabled,
+  hasText: Boolean(text.trim()),
+  model: c.env.AI_MODEL || MODEL,
+});
   if (c.env.AI && publicAiEnabled && text.trim()) {
     try {
       const prompt = `You classify university study documents. Use ONLY the supplied registry to identify a unit. Never invent a code or title. If no exact/strong match exists, set unit_code and unit_title to null. Return only JSON with keys: unit_code, unit_title, type (notes|cat|exam|assignment|other), academic_year (integer or null), display_title (string), topics (array of strings), confidence (0..1), reason (short string), segments (array; each has title, unit_code, page_start, page_end, confidence). Do not assert page ranges unless the text explicitly includes page markers. Segments are review suggestions only. Registry: ${JSON.stringify(known)}\nFilename: ${filename}\nDocument text:\n${text}`;
@@ -280,8 +286,23 @@ ai.post('/analyze', async (c) => {
         ],
         max_tokens: 900,
       });
-      suggestion = parseJson(result?.response || result?.output_text || result?.result || '');
-      if (suggestion) provider = 'cloudflare-workers-ai';
+      const output =
+  result?.response ?? result?.output_text ?? result?.result ?? '';
+
+suggestion = parseJson(output);
+
+if (suggestion) {
+  provider = 'cloudflare-workers-ai';
+} else {
+  console.warn('Workers AI returned no parseable JSON', {
+    model: c.env.AI_MODEL || MODEL,
+    resultKeys: result && typeof result === 'object'
+      ? Object.keys(result)
+      : [],
+    outputType: typeof output,
+    outputLength: String(output).length,
+  });
+}
     } catch (err) {
       console.warn('Workers AI analysis unavailable; using deterministic fallback', err?.message || String(err));
     }
