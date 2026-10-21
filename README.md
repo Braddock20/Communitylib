@@ -367,3 +367,37 @@ This endpoint publishes only segments already stored with `status='generated'`. 
 7. Publish generated segments only after human review using the endpoint above.
 
 No database migration is added by these code changes; the publishing endpoint uses the existing `resources`, `resource_files`, `units`, `document_segments`, and `ai_audit_log` schema introduced by the current project migrations.
+
+## Agentic library tools (v4.2.0)
+
+The AI tool inventory is available at `GET /api/ai/tools`. It describes read-only tools, review tools, and admin-only mutation tools. The inventory does not execute actions by itself.
+
+### Browser-side PDF extraction
+
+Communitylib deliberately does **not** parse a large PDF inside a Worker request. The Worker has a 128 MB memory ceiling, and the existing PHY121 PDF is about 20.5 MB. Instead, `frontend/agentic-tools.js` uses PDF.js in the browser to extract page text, keeps page markers, and sends bounded text to the protected API. This supports text-based PDFs; scanned/image-only PDFs need OCR, which is not included in this release.
+
+Load PDF.js first and configure its worker source, then import the module:
+
+```js
+import { CommunitylibAgenticTools } from './agentic-tools.js';
+const agent = new CommunitylibAgenticTools({
+  apiBase: 'https://communitylib.talesapi.workers.dev',
+  adminKey: YOUR_ADMIN_KEY, // pass securely; do not hardcode into a public app or commit it
+  pdfjs: globalThis.pdfjsLib,
+});
+const result = await agent.analyzeResource('1');
+console.log(result); // suggestions only; review before applying
+```
+
+A private interactive console is included at `frontend/agentic-tools-console.html`. It provides buttons for the main workflows and keeps the admin key in memory only; do not deploy it as a public admin surface without an appropriate access-control layer.
+
+Available client methods include `tools`, `searchLibrary`, `searchRegistry`, `inspectResource`, `previewResource`, `extractPdf`, `analyzeResource`, `listSegments`, `saveSegments`, `applyMetadata`, `splitPdf`, `publishSegments`, `mergePdfs`, `jobs`, and `study` (`ask`, `summarize`, `flashcards`, `quiz`). The destructive/visibility-changing operations remain separate explicit calls and require `ADMIN_API_KEY`. Never put that key in a public browser bundle; use the module only in a private admin environment or proxy admin actions through a trusted server.
+
+New API endpoints:
+
+- `GET /api/ai/tools` — tool inventory and safety levels.
+- `POST /api/ai/extract-text` — authenticated persistence of browser-extracted per-page text; updates page count and preview snippet.
+- `POST /api/ai/apply-metadata` — authenticated application of reviewed metadata after verifying the unit code against the registry.
+- `POST /api/ai/study` — authenticated question answering, summarization, flashcard and quiz generation using stored extracted text.
+
+Run `npm test` before deploying. Apply migrations already present in the hardened project as described in `DEPLOYMENT_CHECKLIST.md`; then configure `ADMIN_API_KEY`. PDF splitting/merging still obeys the existing processing feature flag and 15 MiB source limit. The 20.5 MiB PHY121 file can be extracted in the browser, but it must not be split/merged by the current synchronous Worker PDF processor without a separate safe processing design.
