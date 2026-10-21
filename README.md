@@ -173,3 +173,158 @@ POST /api/resource/:id/comments
 
 GET  /api/files/*                streaming proxy into private B2 bucket
 ```
+
+
+---
+
+## 6. Communitylib v4 AI + preview edition
+
+Version 4 keeps the existing resource IDs, original file names, B2 object keys,
+download proxy and existing API routes. Apply the original `schema.sql` only
+for a fresh database. For an existing installation, run **only**
+`migrations/004_ai_library.sql` in the Neon SQL Editor after confirming the
+backup/maintenance window. The migration is additive; it does not delete
+resources or rewrite storage URLs.
+
+### AI provider and safe behaviour
+
+The Worker can use Cloudflare Workers AI through the `AI` binding. The default
+model is `@cf/meta/llama-3.1-8b-instruct`; override it with an `AI_MODEL` Worker
+variable if you select a compatible model available to your account. AI is
+optional: `/api/ai/analyze` falls back to deterministic filename/text matching
+when the binding is absent or fails. A model response is a suggestion, not a
+database write. A unit code is marked verified only when it matches the
+registry. Unknown codes are returned separately as unverified candidates.
+
+Workers AI usage and model availability are subject to Cloudflare account
+limits and pricing. The application does not train a foundation model. Public Workers AI inference is disabled by default to reduce quota-abuse risk; enable it only with an appropriate Cloudflare rate limit. It
+combines the model with the unit registry, provenance, deterministic checks,
+and reviewable suggestions.
+
+### New environment settings
+
+Add these in Workers & Pages → your Worker → Settings → Variables and Secrets:
+
+- `ADMIN_API_KEY` — **secret**, required for registry imports, saving split
+  suggestions, and processing-job inspection. Use a long random value.
+- `AI_MODEL` — optional plain-text variable; defaults to the model above.
+- `AI_PUBLIC_ENABLED` — defaults to `false`; set to `true` only after adding a Cloudflare rate-limit rule for `/api/ai/analyze`. With it disabled, deterministic fallback analysis still works and no public request consumes Workers AI quota.
+- Keep `DATABASE_URL`, `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`,
+  `B2_ENDPOINT`, and `B2_REGION` as configured already.
+
+Do not put credentials in the repository, browser JavaScript, or a public
+frontend. `ADMIN_API_KEY` must only be used by a trusted admin environment.
+
+### New endpoints
+
+```
+GET  /api/ai/registry?q=...
+POST /api/ai/registry/import        admin; JSON unit registry import
+POST /api/ai/analyze                AI/deterministic metadata suggestions
+POST /api/ai/segments               admin; save proposed page ranges for review
+GET  /api/ai/segments/:resourceId   saved page-range suggestions
+POST /api/ai/split/:resourceId      admin; physically split a PDF by page ranges
+POST /api/ai/merge                  admin; merge 2-20 PDFs from same unit/type
+GET  /api/ai/jobs?status=queued     admin; recent processing-job status
+GET  /api/resource/:id/preview      frontend-ready preview metadata
+```
+
+Registry import body:
+
+```json
+{
+  "source_name": "UoE supplementary examination timetable, revised 2026-07-20",
+  "source_type": "official_timetable",
+  "source_date": "2026-07-20",
+  "source_reference": "Replace with the actual document URL or filename",
+  "units": [
+    {
+      "code": "PHYS 121",
+      "title": "Title exactly as printed in the source",
+      "aliases": ["PHYS121"],
+      "confidence": 0.7,
+      "notes": "Extracted from timetable; confirm against the official catalogue"
+    }
+  ]
+}
+```
+
+Accepted source types are `official_catalogue`, `official_timetable`,
+`faculty_list`, `manual`, and `unverified`. A timetable entry is not
+automatically treated as proof that a unit is currently offered. Keep the
+source and confidence. Imports upsert a unit by normalized code + title;
+they do not delete older titles or aliases.
+
+Analysis request:
+
+```json
+{
+  "filename": "PHYS121_CAT_2025.pdf",
+  "text": "Paste text extracted from the document here..."
+}
+```
+
+The response contains suggested unit/type/year/title/topics, confidence,
+whether the unit code is verified against the registry, and optional segment
+suggestions. It never applies the metadata automatically. PDF text extraction
+and OCR are not silently claimed to happen on the Worker: send extracted text
+to the endpoint, or add a separately configured extraction/OCR provider.
+
+### Document preview / thumbnail system
+
+`GET /api/resource/:id/preview` returns the title, first available preview URL,
+snippet, file count, file metadata and the renderer recommendation. The included
+`frontend/document-preview.js` defines a reusable
+`<communitylib-document-preview resource-id="123">` component that displays a
+compact chat-app-style file card. With PDF.js loaded it renders page one of a
+PDF in the browser; images are shown directly; other types receive a fallback.
+The preview demo is `frontend/preview-demo.html`.
+
+Example embedding:
+
+```html
+<script type="module">
+  import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+  globalThis.pdfjsLib = pdfjsLib;
+  await import('/frontend/document-preview.js');
+</script>
+<communitylib-document-preview api-base="https://YOUR-WORKER.example"
+  resource-id="123"></communitylib-document-preview>
+```
+
+PDF first-page rendering is client-side; it is not represented as a permanently
+generated B2 thumbnail. The component can be extended later to post a generated
+thumbnail to a private storage pipeline. Text snippets are drawn from the
+resource note/text metadata when available. Existing PDFs may show a fallback
+snippet until text extraction is configured.
+
+### Split/merge and ingestion safety
+
+The AI endpoint can propose page-range segments, and `/api/ai/segments` stores
+those suggestions with a `suggested` status for an admin to review. **This
+version does not physically split arbitrary PDFs or automatically merge
+separate PDF fragments.** The original file remains unchanged. A production
+split/merge worker needs a PDF page manipulation implementation, file-size
+limits, and an approval flow; do not auto-publish a guessed page boundary.
+
+Existing uploads remain compatible. Current duplicate checks still use SHA-256
+for each file and an order-independent resource hash. Failed upload cleanup
+remains in place. Existing B2 object keys and the `/api/files/*` proxy are
+unchanged.
+
+### Smoke tests
+
+Install Node.js dependencies and run:
+
+```sh
+npm install
+npm test
+npm run dev
+```
+
+Then check `GET /health`, `GET /health/db`, and (with database access)
+`GET /api/ai/registry`. The included tests cover deterministic normalization,
+stable hashing and image/PDF extension decisions. Live Neon/B2/Workers AI
+integration requires the deployment's actual secrets and resources.
