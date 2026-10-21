@@ -4,9 +4,72 @@ import { normalizeCode, normalizeText, sha256Hex, combineHashes } from '../utils
 import { getStorage } from '../storage.js';
 import { PDFDocument } from 'pdf-lib';
 
+
 const ai = new Hono();
 const MODEL = '@cf/meta/llama-3.1-8b-instruct';
 const MAX_TEXT = 24000;
+
+function clientRateLimitKey(c) {
+  // Cloudflare supplies this header to requests handled by its Worker.
+  // Do not accept a client-supplied forwarding header as the identity.
+  const ip = c.req.header('cf-connecting-ip');
+  return ip ? `ip:${ip}` : null;
+}
+
+ai.use('*', async (c, next) => {
+  // CORS preflight requests should not consume API rate-limit tokens.
+  if (c.req.method === 'OPTIONS') return next();
+
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method;
+
+  let binding;
+
+  if (path === '/analyze' && method === 'POST') {
+    binding = c.env.AI_CLASSIFY_LIMITER;
+  } else if (
+    path === '/registry/import' ||
+    path === '/segments' ||
+    /^\/split\/\d+$/.test(path) ||
+    path === '/merge' ||
+    path === '/jobs'
+  ) {
+    binding = c.env.AI_ADMIN_LIMITER;
+  } else {
+    binding = c.env.AI_SEARCH_LIMITER;
+  }
+
+  // Fail closed if the required Cloudflare binding is missing.
+  if (!binding || typeof binding.limit !== 'function') {
+    console.error('AI rate-limit binding is missing', { path, method });
+    return c.json({ error: 'rate_limit_unavailable' }, 503);
+  }
+
+  const key = clientRateLimitKey(c);
+
+  // Avoid putting all requests into one shared "unknown" bucket.
+  if (!key) {
+    return c.json({ error: 'client_identity_unavailable' }, 503);
+  }
+
+  try {
+    const { success } = await binding.limit({ key });
+
+    if (!success) {
+      return c.json(
+        { error: 'rate_limit_exceeded', retry_after_seconds: 60 },
+        429,
+        { 'Retry-After': '60' }
+      );
+    }
+  } catch (err) {
+    // Fail closed rather than accidentally exposing unprotected AI routes.
+    console.error('AI rate-limit check failed', err?.message || String(err));
+    return c.json({ error: 'rate_limit_unavailable' }, 503);
+  }
+
+  await next();
+});
 
 function authorized(c) {
   const key = c.env.ADMIN_API_KEY;
