@@ -328,3 +328,35 @@ Then check `GET /health`, `GET /health/db`, and (with database access)
 `GET /api/ai/registry`. The included tests cover deterministic normalization,
 stable hashing and image/PDF extension decisions. Live Neon/B2/Workers AI
 integration requires the deployment's actual secrets and resources.
+
+
+## AI classification and safe PDF segmentation (updated)
+
+`POST /api/ai/analyze` now scans the complete unit registry for explicit unit-code mentions, even when the AI's primary classification query only found one likely unit. Its response preserves the existing `suggestions` object and adds `detected_units` and `is_multi_unit_document` both inside `suggestions` and at the top level. A multi-unit result always requires manual review.
+
+Suggested page ranges are never silently repaired. Missing, fractional, zero/negative, or reversed page boundaries are marked invalid for review. The admin-only split endpoint validates integer page ranges against the actual PDF page count and rejects overlaps before writing derived PDFs. The original file remains unchanged.
+
+After reviewing a successful split, an administrator may publish the generated PDFs as normal library resources:
+
+```http
+POST /api/ai/publish-segments/:resourceId
+Authorization: Bearer <ADMIN_API_KEY>
+```
+
+This endpoint publishes only segments already stored with `status='generated'`. It is a separate, explicit action; splitting does not automatically make generated files appear in ordinary library search. Repeating the request is safe for files with matching SHA-256 hashes.
+
+### Model configuration
+
+`wrangler.toml` uses `@cf/meta/llama-3.2-3b-instruct` as `AI_MODEL`, matching the current configured production model described by the project maintainer. The hardcoded fallback is `@cf/meta/llama-3.1-8b-instruct-fast`. JSON response mode is opt-in via `AI_JSON_MODE="true"` because support depends on the selected Workers AI model; leave it unset until tested against the active model. The classifier still requests valid JSON and uses the existing parser/fallback path.
+
+### Safe deployment checklist
+
+1. Back up the currently deployed Worker source/configuration and preserve a copy of its non-secret variable names/values. Never export or commit `ADMIN_API_KEY`, database URLs, or B2 application keys.
+2. Review this source against the live Worker before deploying; this ZIP is a GitHub source snapshot, not a guaranteed export of the live deployed bundle.
+3. Verify Cloudflare Workers Builds/automatic deployment settings. A GitHub commit may deploy automatically if that integration is enabled.
+4. Install dependencies and run `npm test`; then run `npx wrangler deploy` only after confirming the target Worker, bindings, variables, and secrets.
+5. Test `/api/ai/analyze` using a combined document mentioning two registry codes. Confirm both appear in `detected_units`, `is_multi_unit_document` is `true`, and `suggestions.requires_review` is `true`.
+6. For an authorized PDF split, test invalid and overlapping ranges first and confirm they return HTTP 400 without generating files. Then split a valid range and verify the original still downloads.
+7. Publish generated segments only after human review using the endpoint above.
+
+No database migration is added by these code changes; the publishing endpoint uses the existing `resources`, `resource_files`, `units`, `document_segments`, and `ai_audit_log` schema introduced by the current project migrations.
