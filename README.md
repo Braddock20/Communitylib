@@ -50,8 +50,8 @@ auto-deploy via Workers Builds).
 | `B2_BUCKET` | your bucket name |
 | `B2_ENDPOINT` | from step 1.2 |
 | `B2_REGION` | e.g. `eu-central-003` |
-| `B2_PUBLIC_BASE_URL` | your bucket's friendly URL or a CDN in front of it |
-| `DEBUG_KEY` *(optional)* | any random string — see §3 below |
+| `DEBUG_KEY` *(optional)* | random secret; send only in `X-Debug-Key` header |
+| `ADMIN_API_KEY` | long random secret for admin AI/registry/PDF endpoints |
 
 Push this project to the connected repo (or upload the files directly if
 using the dashboard's own editor) and Workers Builds deploys it. Attach a
@@ -80,18 +80,17 @@ that's what caused the "Could not find zone" deploy failure last time.
 
 ## 3. Debugging without a CLI
 
-Set the optional `DEBUG_KEY` secret (any random string), then visit:
+Set the optional `DEBUG_KEY` secret (any random string), then send a request
+with the key in a header—not in the URL, because query strings can be logged:
 
-```
-https://communitylib.talesapi.workers.dev/health/db?debug_key=YOUR_KEY
+```sh
+curl -H "X-Debug-Key: YOUR_KEY" \\
+  https://communitylib.talesapi.workers.dev/health/db
 ```
 
-in a normal browser tab. On failure you'll get the exact reason —
-which env var was tried, which host it resolved to, and the specific
-connection error — right there in the JSON response. No `wrangler tail`,
-no Logs dashboard tab, no local anything. Leave `DEBUG_KEY` unset and the
-endpoint behaves exactly like the generic version above; nothing is
-exposed by default.
+On failure, the response includes diagnostic details only when the key matches.
+Leave `DEBUG_KEY` unset and the endpoint behaves like the generic readiness check;
+nothing is exposed by default.
 
 ---
 
@@ -139,7 +138,7 @@ exposed by default.
 
 ```
 GET  /health
-GET  /health/db[?debug_key=...]
+GET  /health/db                 optional X-Debug-Key header for diagnostics
 
 POST /api/upload                 multipart/form-data
 
@@ -182,14 +181,14 @@ GET  /api/files/*                streaming proxy into private B2 bucket
 Version 4 keeps the existing resource IDs, original file names, B2 object keys,
 download proxy and existing API routes. Apply the original `schema.sql` only
 for a fresh database. For an existing installation, run **only**
-`migrations/004_ai_library.sql` in the Neon SQL Editor after confirming the
-backup/maintenance window. The migration is additive; it does not delete
+`migrations/004_ai_library.sql` and then `migrations/005_performance_safety.sql` in the Neon SQL Editor after confirming the
+backup/maintenance window. Both migrations are additive; they do not delete
 resources or rewrite storage URLs.
 
 ### AI provider and safe behaviour
 
 The Worker can use Cloudflare Workers AI through the `AI` binding. The default
-model is `@cf/meta/llama-3.1-8b-instruct`; override it with an `AI_MODEL` Worker
+model is `@cf/meta/llama-3.1-8b-instruct-fast`; override it with an `AI_MODEL` Worker
 variable if you select a compatible model available to your account. AI is
 optional: `/api/ai/analyze` falls back to deterministic filename/text matching
 when the binding is absent or fails. A model response is a suggestion, not a
@@ -207,8 +206,10 @@ Add these in Workers & Pages → your Worker → Settings → Variables and Secr
 
 - `ADMIN_API_KEY` — **secret**, required for registry imports, saving split
   suggestions, and processing-job inspection. Use a long random value.
-- `AI_MODEL` — optional plain-text variable; defaults to the model above.
-- `AI_PUBLIC_ENABLED` — defaults to `false`; set to `true` only after adding a Cloudflare rate-limit rule for `/api/ai/analyze`. With it disabled, deterministic fallback analysis still works and no public request consumes Workers AI quota.
+- `AI_MODEL` — optional plain-text variable; defaults to the model above. Keep this aligned with a currently supported model in your Cloudflare account.
+- `PDF_PROCESSING_ENABLED` — defaults to `false`; enable only after confirming Worker CPU/memory limits support synchronous PDF operations.
+- `IMAGE_PDF_COMBINE_ENABLED` — defaults to `false`; same CPU-safety restriction for multi-image conversion.
+- `AI_PUBLIC_ENABLED` — defaults to `false`; public model inference is off until you deliberately enable it. The Worker has a per-IP limiter, but rotating IPs can still consume quota. Enable only if you accept that exposure and monitor usage.
 - Keep `DATABASE_URL`, `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`,
   `B2_ENDPOINT`, and `B2_REGION` as configured already.
 
@@ -222,7 +223,7 @@ GET  /api/ai/registry?q=...
 POST /api/ai/registry/import        admin; JSON unit registry import
 POST /api/ai/analyze                AI/deterministic metadata suggestions
 POST /api/ai/segments               admin; save proposed page ranges for review
-GET  /api/ai/segments/:resourceId   saved page-range suggestions
+GET  /api/ai/segments/:resourceId   admin; saved page-range suggestions
 POST /api/ai/split/:resourceId      admin; physically split a PDF by page ranges
 POST /api/ai/merge                  admin; merge 2-20 PDFs from same unit/type
 GET  /api/ai/jobs?status=queued     admin; recent processing-job status
@@ -303,11 +304,15 @@ snippet until text extraction is configured.
 ### Split/merge and ingestion safety
 
 The AI endpoint can propose page-range segments, and `/api/ai/segments` stores
-those suggestions with a `suggested` status for an admin to review. **This
-version does not physically split arbitrary PDFs or automatically merge
-separate PDF fragments.** The original file remains unchanged. A production
-split/merge worker needs a PDF page manipulation implementation, file-size
-limits, and an approval flow; do not auto-publish a guessed page boundary.
+those suggestions with a `suggested` status for an admin to review. The admin-only
+`/api/ai/split/:resourceId` endpoint physically extracts approved page ranges into
+derived PDFs; `/api/ai/merge` merges selected PDFs from the same unit and type.
+The original files remain unchanged. PDF processing is capped at 15 MB per
+source and 15 MB total for merges to reduce Worker memory risk. Generated
+segments are not exposed through the public file proxy until they are published
+as ordinary library resources. Never auto-publish a guessed page boundary.
+
+Uploads are capped at 25 MB total and 25 MB per file. Synchronous image-to-PDF conversion is disabled by default (`IMAGE_PDF_COMBINE_ENABLED=false`) because measured CPU use exceeds the Free Workers CPU budget; if enabled on a suitable paid plan, it is still capped at 10 images and 8 MB combined. Physical PDF split/merge is also disabled by default (`PDF_PROCESSING_ENABLED=false`) because `pdf-lib` CPU and memory use must be validated against the account's plan. Enable only after confirming the plan supports it or moving processing off-request. Apply `migrations/005_performance_safety.sql` before deploying the search code; it adds indexed resource topics and feed covering indexes.
 
 Existing uploads remain compatible. Current duplicate checks still use SHA-256
 for each file and an order-independent resource hash. Failed upload cleanup
@@ -319,20 +324,22 @@ unchanged.
 Install Node.js dependencies and run:
 
 ```sh
-npm install
+# First time only, on a network-enabled machine; commit the generated lockfile.
+npm install --package-lock-only
+npm ci
 npm test
 npm run dev
 ```
 
 Then check `GET /health`, `GET /health/db`, and (with database access)
-`GET /api/ai/registry`. The included tests cover deterministic normalization,
-stable hashing and image/PDF extension decisions. Live Neon/B2/Workers AI
+`GET /api/ai/registry`. The included tests cover unit-code matching (including document-start boundaries),
+segment boundary validation, deterministic normalization, stable hashing, and registry provenance. Live Neon/B2/Workers AI
 integration requires the deployment's actual secrets and resources.
 
 
 ## AI classification and safe PDF segmentation (updated)
 
-`POST /api/ai/analyze` now scans the complete unit registry for explicit unit-code mentions, even when the AI's primary classification query only found one likely unit. Its response preserves the existing `suggestions` object and adds `detected_units` and `is_multi_unit_document` both inside `suggestions` and at the top level. A multi-unit result always requires manual review.
+`POST /api/ai/analyze` now scans the complete unit registry for explicit unit-code mentions, even when the AI's primary classification query only found one likely unit. Its response preserves the existing `suggestions` object and adds `detected_units`, `registry_ambiguities`, and `is_multi_unit_document` both inside `suggestions` and at the top level. A multi-unit result or a code with conflicting registry titles always requires manual review.
 
 Suggested page ranges are never silently repaired. Missing, fractional, zero/negative, or reversed page boundaries are marked invalid for review. The admin-only split endpoint validates integer page ranges against the actual PDF page count and rejects overlaps before writing derived PDFs. The original file remains unchanged.
 
@@ -347,14 +354,14 @@ This endpoint publishes only segments already stored with `status='generated'`. 
 
 ### Model configuration
 
-`wrangler.toml` uses `@cf/meta/llama-3.2-3b-instruct` as `AI_MODEL`, matching the current configured production model described by the project maintainer. The hardcoded fallback is `@cf/meta/llama-3.1-8b-instruct-fast`. JSON response mode is opt-in via `AI_JSON_MODE="true"` because support depends on the selected Workers AI model; leave it unset until tested against the active model. The classifier still requests valid JSON and uses the existing parser/fallback path.
+`wrangler.toml` and the hardcoded default now both use `@cf/meta/llama-3.1-8b-instruct-fast`. `AI_JSON_MODE="true"` remains opt-in because response-format support depends on the selected Workers AI model; object-shaped JSON responses are accepted directly. `AI_PUBLIC_ENABLED` ships as `false` to protect quota and must be deliberately enabled in Cloudflare if public model inference is wanted.
 
 ### Safe deployment checklist
 
 1. Back up the currently deployed Worker source/configuration and preserve a copy of its non-secret variable names/values. Never export or commit `ADMIN_API_KEY`, database URLs, or B2 application keys.
 2. Review this source against the live Worker before deploying; this ZIP is a GitHub source snapshot, not a guaranteed export of the live deployed bundle.
 3. Verify Cloudflare Workers Builds/automatic deployment settings. A GitHub commit may deploy automatically if that integration is enabled.
-4. Install dependencies and run `npm test`; then run `npx wrangler deploy` only after confirming the target Worker, bindings, variables, and secrets.
+4. Apply migration 005, generate and commit `package-lock.json` on a network-enabled machine, run `npm ci` and `npm test`, then run `npx wrangler deploy --dry-run` before any production deploy.
 5. Test `/api/ai/analyze` using a combined document mentioning two registry codes. Confirm both appear in `detected_units`, `is_multi_unit_document` is `true`, and `suggestions.requires_review` is `true`.
 6. For an authorized PDF split, test invalid and overlapping ranges first and confirm they return HTTP 400 without generating files. Then split a valid range and verify the original still downloads.
 7. Publish generated segments only after human review using the endpoint above.
