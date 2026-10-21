@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getDb } from '../db.js';
-import { normalizeCode } from '../utils/hash.js';
+import { normalizeCode, normalizeText } from '../utils/hash.js';
 
 const search = new Hono();
 
@@ -21,6 +21,7 @@ search.get('/suggest', async (c) => {
     FROM units
     WHERE code ILIKE ${codeLike + '%'}
        OR title ILIKE ${'%' + q + '%'}
+       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + q + '%'} OR a.normalized_alias ILIKE ${'%' + normalizeText(q) + '%'}))
        OR similarity(title, ${q}) > 0.2
        OR EXISTS (
          SELECT 1 FROM resources r, unnest(r.topics) AS topic
@@ -63,6 +64,7 @@ search.get('/', async (c) => {
       GREATEST(
         similarity(title, ${q}),
         similarity(code_display, ${q}),
+        COALESCE((SELECT MAX(similarity(a.alias, ${q})) FROM unit_aliases a WHERE a.unit_id=units.id), 0),
         COALESCE((
           SELECT MAX(similarity(topic, ${q}))
           FROM resources r, unnest(r.topics) AS topic
@@ -72,6 +74,7 @@ search.get('/', async (c) => {
     FROM units
     WHERE code ILIKE ${'%' + codeLike + '%'}
        OR title ILIKE ${'%' + q + '%'}
+       OR EXISTS (SELECT 1 FROM unit_aliases a WHERE a.unit_id=units.id AND (a.alias ILIKE ${'%' + q + '%'} OR a.normalized_alias ILIKE ${'%' + normalizeText(q) + '%'}))
        OR similarity(title, ${q}) > 0.15
        OR EXISTS (
          SELECT 1 FROM resources r, unnest(r.topics) AS topic
