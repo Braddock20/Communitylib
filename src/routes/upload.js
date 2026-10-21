@@ -172,6 +172,7 @@ upload.post('/', async (c) => {
       ext,
       size: Number(f.size),
       type: f.type || 'application/octet-stream',
+      extractedText: (f.name.split('.').pop() || '').toLowerCase() === 'txt' ? new TextDecoder().decode(bytes).slice(0, 12000) : '',
     });
   }
 
@@ -245,6 +246,8 @@ upload.post('/', async (c) => {
 
     const primaryExt = allImages ? 'image' : uploadedFiles.length === 1 ? uploadedFiles[0].ext : 'mixed';
     const thumbnailUrl = allImages ? uploadedFiles[0].url : null;
+    const extractedText = uploadedFiles.map((f) => f.extractedText || '').filter(Boolean).join('\n\n').slice(0, 20000);
+    const previewSnippet = (extractedText || note || '').replace(/\s+/g, ' ').trim().slice(0, 360);
 
     const noteScope = type === 'notes' ? noteScopeRaw : 'complete';
 
@@ -262,18 +265,20 @@ upload.post('/', async (c) => {
       file_ext: f.ext,
       file_size_bytes: f.size,
       file_hash: f.hash,
+      mime_type: f.type,
+      display_name: f.name,
     })));
 
     try {
       await sql`
         WITH inserted AS (
           INSERT INTO resources
-            (unit_id, type, note_scope, topics, academic_year, title, uploader_name, note, file_count,
-             primary_ext, thumbnail_url, combined_pdf_url, content_hash)
+            (unit_id, type, note_scope, topics, academic_year, title, original_title, uploader_name, note, file_count,
+             primary_ext, thumbnail_url, combined_pdf_url, content_hash, extracted_text, preview_snippet, processing_status)
           VALUES
-            (${unit.id}, ${type}, ${noteScope}, ${topics}, ${academicYear}, ${finalTitle}, ${uploaderName},
+            (${unit.id}, ${type}, ${noteScope}, ${topics}, ${academicYear}, ${finalTitle}, ${resourceTitle || null}, ${uploaderName},
              ${note || null}, ${uploadedFiles.length}, ${primaryExt}, ${thumbnailUrl},
-             ${combinedPdfUrl}, ${contentHash})
+             ${combinedPdfUrl}, ${contentHash}, ${extractedText || null}, ${previewSnippet || null}, 'ready')
           RETURNING id
         ),
         inserted_files AS (
@@ -289,7 +294,9 @@ upload.post('/', async (c) => {
             file_url text,
             file_ext text,
             file_size_bytes bigint,
-            file_hash text
+            file_hash text,
+            mime_type text,
+            display_name text
           )
           RETURNING id
         )
