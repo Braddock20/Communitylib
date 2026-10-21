@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Communitylib · Agent Tools</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0c10;--panel:#14161c;--line:#2b2e38;--text:#f0f1f5;--muted:#a4a8b4;--accent:#9a7bff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:960px;margin:auto;padding:18px}h1{font-size:22px;margin:0 0 6px}h2{font-size:16px;margin:0 0 10px}.muted{color:var(--muted)}.warn{border:1px solid #755f2c;background:#211c10;padding:12px;border-radius:12px;margin:14px 0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}input,textarea{width:100%;background:#090a0e;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:10px;font:inherit}textarea{min-height:110px;resize:vertical}button{border:1px solid #49415e;background:#211d30;color:white;padding:10px 12px;border-radius:10px;font:inherit;cursor:pointer}button.primary{background:#3a2d66;border-color:#6e59b4}button:disabled{opacity:.5}.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#08090c;border:1px solid var(--line);border-radius:10px;padding:12px;min-height:100px;max-height:520px;overflow:auto}.status{font-size:12px;color:var(--muted);margin-top:8px}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:640px){.two{grid-template-columns:1fr}main{padding:12px}}
+</style>
+</head>
+<body><main>
+<h1>Communitylib · Agent Tools</h1>
+<div class="muted">Private admin console for extraction, classification, review and study tools.</div>
+<div class="warn"><strong>Security:</strong> do not hardcode or save your admin key in this file. Use only in a private admin environment. The key stays in this page's memory and is not written to local storage. Suggestions are not applied automatically; splitting and publishing require separate clicks. This is not an OCR tool for scanned pages.</div>
+<section class="panel">
+<h2>Connection</h2><div class="grid">
+<div><label for="api">API base URL</label><input id="api" value="https://communitylib.talesapi.workers.dev" autocomplete="url"></div>
+<div><label for="key">Admin API key</label><input id="key" type="password" autocomplete="off" placeholder="Enter only in this private session"></div>
+<div><label for="rid">Resource ID</label><input id="rid" value="1" inputmode="numeric"></div>
+</div><div class="buttons"><button class="primary" id="tools">Load tool inventory</button><button id="inspect">Inspect resource</button><button id="segments">List saved segments</button><button id="jobs">Processing jobs</button></div>
+<div class="status" id="status">Not connected.</div>
+</section>
+<section class="panel"><h2>Document agent</h2><div class="muted">Extract text in the browser, store page markers, and classify the resource. This can be memory-intensive on older phones.</div><div class="buttons"><button class="primary" id="analyze">Extract PDF + analyze</button><button id="summary">Summarize notes</button><button id="flashcards">Generate flashcards</button><button id="quiz">Generate quiz</button></div><div style="margin-top:10px"><label for="question">Ask a question about this resource</label><input id="question" placeholder="e.g. Explain electric flux and Gauss's law"><div class="buttons"><button id="ask">Ask from notes</button></div></div></section>
+<section class="panel"><h2>Human review · metadata</h2><div class="muted">Review and edit the suggested JSON before applying it to the resource.</div><textarea id="metadata" spellcheck="false" placeholder='Suggestion JSON will appear here'></textarea><div class="buttons"><button id="apply">Apply reviewed metadata</button></div></section>
+<section class="panel"><h2>Human review · page segments</h2><div class="muted">Enter a JSON array with title, unit_code, page_start and page_end. Do not save null or guessed boundaries.</div><textarea id="segmentdata" spellcheck="false" placeholder='[{"title":"Part 1","unit_code":"PHY121","page_start":1,"page_end":10}]'></textarea><div class="buttons"><button id="savesegments">Save segment suggestions</button><button id="split">Split PDF into derived files</button><button id="publish">Publish generated segments</button></div></section>
+<section class="panel"><h2>Merge PDFs</h2><div class="grid"><div><label for="mergeids">Resource IDs (comma-separated)</label><input id="mergeids" placeholder="12,13"></div><div><label for="mergetitle">Merged title (optional)</label><input id="mergetitle" placeholder="Combined PHY121 notes"></div></div><div class="buttons"><button id="merge">Merge selected PDFs</button></div><div class="muted">Existing server limits still apply; current synchronous merge rejects sources over 15 MiB total.</div></section>
+<section class="panel"><h2>Output</h2><pre id="output">Tool responses will appear here.</pre></section>
+</main>
+<script type="module">
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs';
+import { CommunitylibAgenticTools } from './agentic-tools.js';
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+const $=id=>document.getElementById(id);let lastResult=null;
+function client(){return new CommunitylibAgenticTools({apiBase:$('api').value.trim(),adminKey:$('key').value,pdfjs:pdfjsLib});}
+function show(value){lastResult=value;$('output').textContent=typeof value==='string'?value:JSON.stringify(value,null,2);$('status').textContent='Last action: '+new Date().toLocaleTimeString();}
+async function run(fn){try{$('status').textContent='Working…';show(await fn());}catch(e){$('output').textContent=String(e?.message||e);$('status').textContent='Action failed';}}
+const id=()=>$('rid').value.trim();
+$('tools').onclick=()=>run(()=>client().tools());
+$('inspect').onclick=()=>run(()=>client().inspectResource(id()));
+$('segments').onclick=()=>run(()=>client().listSegments(id()));
+$('jobs').onclick=()=>run(()=>client().jobs());
+$('analyze').onclick=()=>run(async()=>{const r=await client().analyzeResource(id());const s=r.analysis||{};$('metadata').value=JSON.stringify(s,null,2);if(Array.isArray(s.segments))$('segmentdata').value=JSON.stringify(s.segments,null,2);return r;});
+$('summary').onclick=()=>run(()=>client().study(id(),'summarize'));
+$('flashcards').onclick=()=>run(()=>client().study(id(),'flashcards'));
+$('quiz').onclick=()=>run(()=>client().study(id(),'quiz'));
+$('ask').onclick=()=>run(()=>client().study(id(),'ask',$('question').value.trim()));
+$('apply').onclick=()=>run(()=>client().applyMetadata(id(),JSON.parse($('metadata').value)));
+$('savesegments').onclick=()=>run(()=>client().saveSegments(id(),JSON.parse($('segmentdata').value)));
+$('split').onclick=()=>run(()=>client().splitPdf(id(),JSON.parse($('segmentdata').value)));
+$('publish').onclick=()=>{if(!confirm('Publish generated segments as normal library resources? This changes public library visibility.'))return;run(()=>client().publishSegments(id()));};
+$('merge').onclick=()=>run(()=>client().mergePdfs($('mergeids').value.split(',').map(x=>x.trim()).filter(Boolean),$('mergetitle').value.trim()));
+</script></body></html>
