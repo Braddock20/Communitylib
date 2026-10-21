@@ -18,6 +18,22 @@ const ALLOWED_EXTS = new Set([
 // the other hits this. Caught explicitly below so the loser gets a clean
 // 409 instead of a generic 500.
 const PG_UNIQUE_VIOLATION = '23505';
+const MIME_BY_EXT = Object.freeze({
+  pdf: 'application/pdf',
+  txt: 'text/plain; charset=utf-8',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+});
+const COMBINE_MAX_FILES = 10;
+const COMBINE_MAX_BYTES = 8 * 1024 * 1024;
+
+function trustedMimeType(ext) {
+  // Never trust the multipart Content-Type supplied by the client.
+  // Unknown/office document types are downloaded as opaque attachments.
+  return MIME_BY_EXT[ext] || 'application/octet-stream';
+}
 
 function envInt(env, key, fallback, min, max) {
   const n = Number.parseInt(env?.[key] ?? '', 10);
@@ -42,7 +58,7 @@ upload.post('/', async (c) => {
 
   // Reject obviously oversized requests before parsing multipart data.
   const contentLength = Number(c.req.header('content-length'));
-  const maxTotalBytes = envInt(env, 'MAX_TOTAL_UPLOAD_MB', 100, 1, 1024) * 1024 * 1024;
+  const maxTotalBytes = envInt(env, 'MAX_TOTAL_UPLOAD_MB', 25, 1, 25) * 1024 * 1024;
   if (Number.isFinite(contentLength) && contentLength > maxTotalBytes) {
     return c.json({ error: `upload exceeds maximum total size of ${Math.round(maxTotalBytes / 1024 / 1024)}MB` }, 413);
   }
@@ -110,8 +126,8 @@ upload.post('/', async (c) => {
   const files = form.getAll('files').filter((f) => f && typeof f.arrayBuffer === 'function' && typeof f.size === 'number');
   if (files.length === 0) return c.json({ error: 'at least one file is required' }, 400);
 
-  const maxFiles = envInt(env, 'MAX_FILES_PER_UPLOAD', 20, 1, 100);
-  const maxSizeBytes = envInt(env, 'MAX_FILE_SIZE_MB', 50, 1, 250) * 1024 * 1024;
+  const maxFiles = envInt(env, 'MAX_FILES_PER_UPLOAD', 20, 1, 20);
+  const maxSizeBytes = envInt(env, 'MAX_FILE_SIZE_MB', 25, 1, 25) * 1024 * 1024;
 
   if (files.length > maxFiles) return c.json({ error: `too many files (max ${maxFiles})` }, 400);
 
@@ -171,7 +187,7 @@ upload.post('/', async (c) => {
       hash,
       ext,
       size: Number(f.size),
-      type: f.type || 'application/octet-stream',
+      type: trustedMimeType(ext),
       extractedText: (f.name.split('.').pop() || '').toLowerCase() === 'txt' ? new TextDecoder().decode(bytes).slice(0, 12000) : '',
     });
   }
@@ -221,6 +237,7 @@ upload.post('/', async (c) => {
 
   const uploadedFiles = [];
   const uploadedKeys = [];
+  let databaseCommitted = false;
 
   try {
     // UUID-based keys avoid Date.now() collisions under concurrent uploads.
@@ -235,9 +252,13 @@ upload.post('/', async (c) => {
     const allImages = uploadedFiles.every((f) => isImageExt(f.ext));
     const canCombineImages = allImages && uploadedFiles.length > 1 &&
       uploadedFiles.every((f) => isPdfConvertibleImageExt(f.ext));
+    const combineBytes = uploadedFiles.reduce((sum, f) => sum + f.size, 0);
+    const withinImageConversionBudget = uploadedFiles.length <= COMBINE_MAX_FILES &&
+      combineBytes <= COMBINE_MAX_BYTES;
 
     let combinedPdfUrl = null;
-    if (canCombineImages) {
+    const imagePdfCombineEnabled = String(env.IMAGE_PDF_COMBINE_ENABLED || 'false').trim().toLowerCase() === 'true';
+    if (canCombineImages && imagePdfCombineEnabled && withinImageConversionBudget) {
       const pdfBytes = await imagesToPdf(uploadedFiles.map((f) => ({ bytes: f.bytes, ext: f.ext })));
       const combinedPdfKey = `units/${unit.id}/${type}/${crypto.randomUUID()}-combined.pdf`;
       combinedPdfUrl = (await storage.putObject(combinedPdfKey, pdfBytes, 'application/pdf')).url;
@@ -283,10 +304,10 @@ upload.post('/', async (c) => {
         ),
         inserted_files AS (
           INSERT INTO resource_files
-            (resource_id, order_index, file_name, file_url, file_ext, file_size_bytes, file_hash)
+            (resource_id, order_index, file_name, file_url, file_ext, file_size_bytes, file_hash, mime_type, display_name)
           SELECT
             inserted.id, f.order_index, f.file_name, f.file_url, f.file_ext,
-            f.file_size_bytes, f.file_hash
+            f.file_size_bytes, f.file_hash, f.mime_type, f.display_name
           FROM inserted
           CROSS JOIN LATERAL jsonb_to_recordset(${fileJson}::jsonb) AS f(
             order_index integer,
@@ -304,6 +325,7 @@ upload.post('/', async (c) => {
         SET resource_count = resource_count + 1
         WHERE id = ${unit.id}
       `;
+      databaseCommitted = true;
     } catch (err) {
       // Don't leave B2 objects behind if the DB insert loses a race.
       await Promise.allSettled(uploadedKeys.map((key) => storage.deleteObject(key)));
@@ -329,8 +351,11 @@ upload.post('/', async (c) => {
 
     return c.json({ resource: { ...resource, files: savedFiles }, unit }, 201);
   } catch (err) {
-    // Covers storage/PDF failures after some objects were already written.
-    await Promise.allSettled(uploadedKeys.map((key) => storage.deleteObject(key)));
+    // Only remove objects if the database transaction did not commit. A
+    // later read failure must not delete files already referenced by rows.
+    if (!databaseCommitted) {
+      await Promise.allSettled(uploadedKeys.map((key) => storage.deleteObject(key)));
+    }
     throw err;
   }
 });
