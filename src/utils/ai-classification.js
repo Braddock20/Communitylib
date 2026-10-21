@@ -6,29 +6,33 @@ import { normalizeCode } from './hash.js';
  */
 export function detectUnitCodeMentions(text, registry = []) {
   const source = String(text || '');
-  const found = [];
-  const seen = new Set();
+  const byCode = new Map();
 
   for (const unit of registry) {
-    const normalized = normalizeCode(unit.code || unit.unit_code || '');
+    const normalized = normalizeCode(unit.code || unit.unit_code || unit.normalized_code || '');
     if (!normalized) continue;
-    const pattern = normalized
-      .split('')
-      .map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('[\\s_-]*');
-    const re = new RegExp(`(^|[^A-Z0-9])${pattern}(?=$|[^A-Z0-9])`, 'i');
-    const display = String(unit.code_display || unit.display_code || unit.code || unit.unit_code || '');
-    if (re.test(source)) {
-      const key = String(unit.id ?? normalized);
-      if (!seen.has(key)) {
-        seen.add(key);
-        found.push({
-          id: unit.id ?? null,
-          code: display || normalized,
-          title: unit.title || unit.unit_title || null,
-        });
-      }
+    const key = String(unit.id ?? normalized);
+    if (!byCode.has(normalized)) {
+      byCode.set(normalized, {
+        id: unit.id ?? null,
+        code: String(unit.code_display || unit.display_code || unit.code || unit.unit_code || normalized),
+        title: unit.title || unit.unit_title || null,
+        _key: key,
+      });
     }
+  }
+
+  // Tokenize the source once rather than compiling one regular expression per
+  // registry unit. This keeps CPU bounded as the registry grows.
+  const found = [];
+  const seen = new Set();
+  const tokenPattern = /(^|[^A-Z0-9])([A-Z]{2,8}[\s_-]*\d{2,4}[A-Z]?)(?=$|[^A-Z0-9])/gi;
+  for (const match of source.matchAll(tokenPattern)) {
+    const normalized = normalizeCode(match[2]);
+    const unit = byCode.get(normalized);
+    if (!unit || seen.has(unit._key)) continue;
+    seen.add(unit._key);
+    found.push({ id: unit.id, code: unit.code, title: unit.title });
   }
   return found;
 }
