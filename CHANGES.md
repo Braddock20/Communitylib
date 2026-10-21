@@ -79,3 +79,14 @@ this API keeps working. Two concrete fixes and one workflow change:
 - Add an admin-only, idempotent-by-content-hash endpoint to publish generated segments as ordinary library resources after review.
 - Align Wrangler `AI_MODEL` with the current configured production model; JSON response mode remains opt-in.
 - Add regression tests for code detection, invalid page boundaries, page-count checks, and overlap checks.
+
+
+## v4.2.0 — Agentic library tools
+
+- Added `GET /api/ai/tools`, a machine-readable inventory with approval/safety levels.
+- Added protected browser-PDF text persistence at `POST /api/ai/extract-text`; page markers are retained and page counts/snippets are updated.
+- Added protected, registry-verified metadata application at `POST /api/ai/apply-metadata`; model suggestions are never applied automatically.
+- Added protected study tools at `POST /api/ai/study` for question answering, summaries, flashcards and quizzes grounded in extracted text.
+- Added `frontend/agentic-tools.js`, a client toolkit for extraction, analysis, registry/library search, reviewable segments, split/merge/publish, job inspection and study tools.
+- Added unit tests for client configuration, admin-key gating and API error propagation.
+- Large PDF text extraction happens in the browser via PDF.js rather than buffering a 20+ MB PDF inside a Worker. Image-only scans require a future OCR integration.
