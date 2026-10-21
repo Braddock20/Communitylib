@@ -3,10 +3,11 @@ import { getDb } from '../db.js';
 import { normalizeCode, normalizeText, sha256Hex, combineHashes } from '../utils/hash.js';
 import { getStorage } from '../storage.js';
 import { PDFDocument } from 'pdf-lib';
+import { detectUnitCodeMentions, sanitizeSuggestedSegments, validateSegmentBoundaries } from '../utils/ai-classification.js';
 
 
 const ai = new Hono();
-const MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 const MAX_TEXT = 24000;
 
 function clientRateLimitKey(c) {
@@ -32,6 +33,7 @@ ai.use('*', async (c, next) => {
     path === '/registry/import' ||
     path === '/segments' ||
     /^\/split\/\d+$/.test(path) ||
+    /^\/publish-segments\/\d+$/.test(path) ||
     path === '/merge' ||
     path === '/jobs'
   ) {
@@ -90,25 +92,60 @@ function parseJson(text) {
   return null;
 }
 function fallbackAnalysis({ text, filename, registry }) {
-  const haystack = `${filename || ''}\n${text || ''}`.toLowerCase();
-  const code = normalizeCode(haystack.match(/\b[A-Z]{2,8}[\s-]*\d{2,4}[A-Z]?\b/i)?.[0] || '');
-  const unit = registry.find((u) => normalizeCode(u.code) === code) ||
-    registry.find((u) => [u.title, ...(u.aliases || [])].some((s) => s && haystack.includes(String(s).toLowerCase())));
+  const haystack = `${filename || ''}\n${text || ''}`;
+  const codeCandidate = normalizeCode(
+    haystack.match(/\b[A-Z]{2,8}[\s_-]*\d{2,4}[A-Z]?\b/i)?.[0] || ''
+  );
+  const detectedByCode = detectUnitCodeMentions(haystack, registry);
+  const detected = [...detectedByCode];
+  const already = new Set(detected.map((u) => String(u.id ?? normalizeCode(u.code))));
+
+  // Titles/aliases are a secondary fallback only when no registry code was found.
+  if (detected.length === 0) {
+    for (const unit of registry) {
+      const key = String(unit.id ?? normalizeCode(unit.code));
+      const candidates = [unit.title, ...(Array.isArray(unit.aliases) ? unit.aliases : [])]
+        .filter((value) => typeof value === 'string' && value.trim().length >= 5);
+      const match = candidates.some((candidate) => {
+        const phrase = candidate.trim().toLowerCase();
+        return haystack.toLowerCase().includes(phrase);
+      });
+      if (match && !already.has(key)) {
+        already.add(key);
+        detected.push({ id: unit.id ?? null, code: unit.code, title: unit.title });
+      }
+    }
+  }
+
+  const isMultiUnit = detected.length > 1;
+  const primary = detected[0] || null;
+  const verifiedCode = primary ? normalizeCode(primary.code) : '';
+  const unverifiedCandidate = codeCandidate && codeCandidate !== verifiedCode ? codeCandidate : null;
   const type = /\b(cat|continuous assessment|test)\b/i.test(haystack) ? 'cat'
     : /\b(supplementary|special|end.of.semester|final exam|examination|exam)\b/i.test(haystack) ? 'exam'
     : /\b(assignment|coursework)\b/i.test(haystack) ? 'assignment' : 'notes';
   const yearMatch = haystack.match(/\b(20(?:0\d|1\d|2[0-9]))\b/);
+
   return {
-    unit_code: unit?.code || (code || null),
-    unit_title: unit?.title || null,
-    unit_code_verified: Boolean(unit),
+    unit_id: primary?.id ?? null,
+    unit_code: primary?.code ?? (codeCandidate || null),
+    unit_title: primary?.title ?? null,
+    unit_code_verified: Boolean(primary),
+    unverified_code_candidate: unverifiedCandidate,
     type,
     academic_year: yearMatch ? Number(yearMatch[1]) : null,
-    display_title: filename ? filename.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() : null,
+    display_title: filename ? filename.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() : (primary?.title || 'Untitled document'),
     topics: [],
-    confidence: unit ? 0.62 : 0.25,
-    reason: unit ? 'Matched filename/text to a known registry unit using deterministic fallback rules.' : 'No reliable registry match; human review recommended.',
+    confidence: primary ? (isMultiUnit ? 0.55 : 0.62) : (codeCandidate ? 0.25 : 0.1),
+    reason: isMultiUnit
+      ? `Document appears to contain multiple registry units: ${detected.map((u) => u.code).join(', ')}. Manual review required.`
+      : primary
+        ? 'Matched filename/text to a known registry unit using deterministic fallback rules.'
+        : 'No reliable registry match; human review recommended.',
     segments: [],
+    requires_review: isMultiUnit || !primary,
+    detected_units: detected,
+    is_multi_unit_document: isMultiUnit,
     provider: 'rules-fallback',
   };
 }
@@ -267,6 +304,17 @@ ai.post('/analyze', async (c) => {
     `;
   }
   const known = registry.map((u) => ({ id: u.id, code: u.display_code, title: u.title, aliases: u.aliases || [] }));
+  // Keep the AI candidate query small, but scan the complete registry for code mentions.
+  const scanRows = await sql`
+    SELECT u.id, u.code, u.code_display, u.title,
+      COALESCE((SELECT array_agg(a.alias) FROM unit_aliases a WHERE a.unit_id=u.id), ARRAY[]::text[]) AS aliases
+    FROM units u
+    ORDER BY u.code, u.title
+  `;
+  const allKnown = scanRows.map((u) => ({
+    id: u.id, code: u.code_display || u.code, code_display: u.code_display || u.code,
+    normalized_code: normalizeCode(u.code), title: u.title, aliases: u.aliases || []
+  }));
   let suggestion = null;
   let provider = 'rules-fallback';
   const publicAiEnabled = String(c.env.AI_PUBLIC_ENABLED || 'false').toLowerCase() === 'true';
@@ -278,13 +326,16 @@ ai.post('/analyze', async (c) => {
 });
   if (c.env.AI && publicAiEnabled && text.trim()) {
     try {
-      const prompt = `You classify university study documents. Use ONLY the supplied registry to identify a unit. Never invent a code or title. If no exact/strong match exists, set unit_code and unit_title to null. Return only JSON with keys: unit_code, unit_title, type (notes|cat|exam|assignment|other), academic_year (integer or null), display_title (string), topics (array of strings), confidence (0..1), reason (short string), segments (array; each has title, unit_code, page_start, page_end, confidence). Do not assert page ranges unless the text explicitly includes page markers. Segments are review suggestions only. Registry: ${JSON.stringify(known)}\nFilename: ${filename}\nDocument text:\n${text}`;
+      const prompt = `You classify university study documents. Use ONLY the supplied registry to identify a unit. Never invent a code or title. If no exact/strong match exists, set unit_code and unit_title to null. Return only valid JSON with keys: unit_code, unit_title, type (notes|cat|exam|assignment|other), academic_year (integer or null), display_title (string), topics (array of strings), confidence (0..1), reason (short string), detected_units (array of registry units detected), segments (array; each has title, unit_code, page_start, page_end, confidence). Do not assert page ranges unless the text explicitly includes page markers. Segments are review suggestions only. If multiple units are present, list all of them in detected_units and require review. Registry: ${JSON.stringify(known)}\nFilename: ${filename}\nDocument text:\n${text}`;
       const result = await c.env.AI.run(c.env.AI_MODEL || MODEL, {
         messages: [
-          { role: 'system', content: 'You are a cautious document metadata classifier. Never fabricate university unit codes. Output valid JSON only.' },
+          { role: 'system', content: 'You are a cautious document metadata classifier. Never fabricate university unit codes. Output one valid JSON object only. Include every registry unit explicitly referenced in the document in detected_units. Never invent page boundaries.' },
           { role: 'user', content: prompt },
         ],
-        max_tokens: 900,
+        max_tokens: 1200,
+        ...(String(c.env.AI_JSON_MODE || 'false').toLowerCase() === 'true'
+          ? { response_format: { type: 'json_object' } }
+          : {}),
       });
       const output =
   result?.response ?? result?.output_text ?? result?.result ?? '';
@@ -307,21 +358,33 @@ if (suggestion) {
       console.warn('Workers AI analysis unavailable; using deterministic fallback', err?.message || String(err));
     }
   }
-  if (!suggestion) suggestion = fallbackAnalysis({ text, filename, registry: known });
+  if (!suggestion) suggestion = fallbackAnalysis({ text, filename, registry: allKnown });
+
+  const mentionedUnits = detectUnitCodeMentions(`${filename}\\n${text}`, allKnown);
+  const modelDetected = Array.isArray(suggestion.detected_units) ? suggestion.detected_units : [];
+  const mergedDetected = [];
+  const seenDetected = new Set();
+  for (const candidate of [...modelDetected, ...(suggestion.unit_code ? [{ unit_code: suggestion.unit_code }] : []), ...(Array.isArray(suggestion.segments) ? suggestion.segments : []).map((s) => ({
+    unit_code: s?.unit_code
+  })), ...mentionedUnits]) {
+    const candidateCode = normalizeCode(candidate?.code || candidate?.code_display || candidate?.unit_code || candidate?.normalized_code || '');
+    const matchedUnit = allKnown.find((u) => (candidate?.id != null && String(u.id) === String(candidate.id)) ||
+      normalizeCode(u.code) === candidateCode || normalizeCode(u.normalized_code) === candidateCode);
+    if (!matchedUnit) continue;
+    const key = String(matchedUnit.id);
+    if (seenDetected.has(key)) continue;
+    seenDetected.add(key);
+    mergedDetected.push({ id: matchedUnit.id, code: matchedUnit.code, title: matchedUnit.title });
+  }
+  // Keep the AI-selected primary if verified; otherwise use the first detected registry unit.
   const rawCode = suggestion.unit_code ? normalizeCode(suggestion.unit_code) : '';
   const [matchedRow] = rawCode ? await sql`SELECT id, code_display AS code, title FROM units WHERE code=${rawCode} ORDER BY id LIMIT 1` : [null];
-  const matched = matchedRow || known.find((u) => normalizeCode(u.code) === rawCode);
+  const matched = matchedRow || allKnown.find((u) => normalizeCode(u.code) === rawCode);
   const rawType = ['notes','cat','exam','assignment','other'].includes(suggestion.type) ? suggestion.type : 'other';
   const year = Number.isInteger(Number(suggestion.academic_year)) && Number(suggestion.academic_year) >= 1900 && Number(suggestion.academic_year) <= 2100
     ? Number(suggestion.academic_year) : null;
-  const segments = Array.isArray(suggestion.segments) ? suggestion.segments.slice(0,50).map((s) => ({
-    title: String(s.title || 'Untitled segment').slice(0,200),
-    unit_code: s.unit_code && known.some((u) => normalizeCode(u.code) === normalizeCode(s.unit_code)) ? normalizeCode(s.unit_code) : null,
-    page_start: Number.isInteger(Number(s.page_start)) && Number(s.page_start) > 0 ? Number(s.page_start) : null,
-    page_end: Number.isInteger(Number(s.page_end)) && Number(s.page_end) > 0 ? Number(s.page_end) : null,
-    confidence: clampConfidence(s.confidence, 0.3),
-    requires_review: true,
-  })).filter((s) => !s.page_end || !s.page_start || s.page_end >= s.page_start) : [];
+  const segments = sanitizeSuggestedSegments(suggestion.segments, allKnown);
+
   const confidence = clampConfidence(suggestion.confidence, 0.3);
   return c.json({
     suggestions: {
@@ -337,10 +400,14 @@ if (suggestion) {
       confidence,
       reason: String(suggestion.reason || 'Review this suggestion before applying it.').slice(0,500),
       segments,
-      requires_review: confidence < 0.8 || !matched || segments.length > 0,
+      detected_units: mergedDetected,
+      is_multi_unit_document: mergedDetected.length > 1,
+      requires_review: confidence < 0.8 || !matched || segments.length > 0 || mergedDetected.length > 1,
       provider,
     },
-    registry_matches: known.filter((u) => rawCode && normalizeCode(u.code) === rawCode).slice(0,3).map(({id,code,title})=>({id,code,title})),
+    detected_units: mergedDetected,
+    is_multi_unit_document: mergedDetected.length > 1,
+    registry_matches: allKnown.filter((u) => rawCode && normalizeCode(u.code) === rawCode).slice(0,3).map(({id,code,title})=>({id,code,title})),
     disclaimer: 'Metadata is a suggestion only. Confirm unit and page boundaries before saving or splitting files.',
   });
 });
@@ -364,6 +431,10 @@ ai.post('/segments', async (c) => {
   try { body = await c.req.json(); } catch { return c.json({ error: 'valid JSON body required' }, 400); }
   if (!/^\d+$/.test(String(body.resource_id || '')) || !Array.isArray(body.segments) || body.segments.length < 1 || body.segments.length > 50) {
     return c.json({ error: 'resource_id and 1-50 segments are required' }, 400);
+  }
+  const boundaryErrors = validateSegmentBoundaries(body.segments, null);
+  if (boundaryErrors.length) {
+    return c.json({ error: 'Invalid segment boundaries', details: boundaryErrors }, 400);
   }
   const sql = await getDb(c.env);
   const [resource] = await sql`SELECT id FROM resources WHERE id=${body.resource_id}`;
@@ -435,6 +506,10 @@ ai.post('/split/:resourceId', async (c) => {
   try { source = await getResourcePdf(sql, storage, resourceId); }
   catch (err) { return c.json({ error: err.message }, err.message === 'resource not found or not available' ? 404 : 400); }
   const pageCount = source.pdf.getPageCount();
+  const boundaryErrors = validateSegmentBoundaries(body.segments, pageCount);
+  if (boundaryErrors.length) {
+    return c.json({ error: 'Invalid segment boundaries', details: boundaryErrors }, 400);
+  }
   const ranges = body.segments.map((seg, i) => ({
     index: i + 1, title: String(seg.title || `Part ${i+1}`).slice(0,200),
     unit_code: seg.unit_code ? normalizeCode(seg.unit_code) : '',
@@ -455,6 +530,11 @@ ai.post('/split/:resourceId', async (c) => {
     return c.json({ error: 'segment page ranges overlap; adjust them before splitting' }, 400);
   }
   const uploaded = [];
+  const previousGenerated = await sql`
+    SELECT segment_index, generated_file_key
+    FROM document_segments
+    WHERE resource_id=${resourceId} AND status='generated' AND generated_file_key IS NOT NULL
+  `;
   try {
     for (const r of ranges) {
       const output = await PDFDocument.create();
@@ -466,22 +546,190 @@ ai.post('/split/:resourceId', async (c) => {
       const stored = await storage.putObject(key, bytes, 'application/pdf');
       uploaded.push({ ...r, key, url: stored.url, bytes: bytes.byteLength, hash: await sha256Hex(bytes) });
     }
-    for (const r of uploaded) {
-      await sql`
-        INSERT INTO document_segments(resource_id,segment_index,unit_id,title,page_start,page_end,confidence,status,source_resource_id,generated_file_key,notes)
-        VALUES(${resourceId},${r.index},${r.unit_id},${r.title},${r.start},${r.end},${r.confidence},'generated',${resourceId},${r.key},'Generated from a copied page range; original PDF retained.')
-        ON CONFLICT(resource_id,segment_index) DO UPDATE SET unit_id=EXCLUDED.unit_id,title=EXCLUDED.title,page_start=EXCLUDED.page_start,page_end=EXCLUDED.page_end,confidence=EXCLUDED.confidence,status='generated',source_resource_id=EXCLUDED.source_resource_id,generated_file_key=EXCLUDED.generated_file_key,notes=EXCLUDED.notes
-      `;
-    }
-    await sql`INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details) VALUES('pdf_split','admin','resource',${resourceId},${JSON.stringify({page_count:pageCount,segments:uploaded.length})}::jsonb)`;
-    return c.json({ source_resource_id: resourceId, source_pages: pageCount, original_preserved: true,
-      segments: uploaded.map(({index,title,unit_id,start,end,url,bytes})=>({index,title,unit_id,page_start:start,page_end:end,url,size_bytes:bytes})),
-      note: 'Generated PDFs are stored in private B2 and linked to the reviewable segment records. The original file was not changed.' });
+
+    // One database statement keeps segment metadata all-or-nothing.
+    const segmentJson = JSON.stringify(uploaded.map((r) => ({
+      segment_index: r.index,
+      unit_id: r.unit_id,
+      title: r.title,
+      page_start: r.start,
+      page_end: r.end,
+      confidence: r.confidence,
+      generated_file_key: r.key,
+    })));
+    await sql`
+      INSERT INTO document_segments
+        (resource_id,segment_index,unit_id,title,page_start,page_end,confidence,status,source_resource_id,generated_file_key,notes)
+      SELECT ${resourceId},x.segment_index,x.unit_id,x.title,x.page_start,x.page_end,x.confidence,
+        'generated',${resourceId},x.generated_file_key,
+        'Generated from a copied page range; original PDF retained.'
+      FROM jsonb_to_recordset(${segmentJson}::jsonb) AS x(
+        segment_index integer,unit_id integer,title text,page_start integer,page_end integer,
+        confidence numeric,generated_file_key text
+      )
+      ON CONFLICT(resource_id,segment_index) DO UPDATE SET
+        unit_id=EXCLUDED.unit_id,title=EXCLUDED.title,page_start=EXCLUDED.page_start,
+        page_end=EXCLUDED.page_end,confidence=EXCLUDED.confidence,status='generated',
+        source_resource_id=EXCLUDED.source_resource_id,generated_file_key=EXCLUDED.generated_file_key,
+        notes=EXCLUDED.notes
+    `;
   } catch (err) {
     await Promise.allSettled(uploaded.map((r)=>storage.deleteObject(r.key)));
     console.error('PDF split failed', err?.message || String(err));
     return c.json({ error: 'PDF split failed; generated objects were cleaned up where possible', detail: err?.message || String(err) }, 500);
   }
+
+  // Remove stale generated rows if this re-split now has fewer segments.
+  try {
+    await sql`
+      DELETE FROM document_segments
+      WHERE resource_id=${resourceId} AND status='generated' AND segment_index > ${uploaded.length}
+    `;
+  } catch (err) {
+    console.error('Could not remove stale generated segment rows', err?.message || String(err));
+  }
+
+  // Delete replaced objects only after the new segment rows have committed.
+  const currentKeys = new Set(uploaded.map((r) => r.key));
+  const replacedKeys = previousGenerated.map((r) => r.generated_file_key).filter((key) => key && !currentKeys.has(key));
+  const deletableKeys = [];
+  for (const key of replacedKeys) {
+    const fileUrl = `/api/files/${String(key).split('/').map(encodeURIComponent).join('/')}`;
+    try {
+      const [referenced] = await sql`SELECT id FROM resource_files WHERE file_url=${fileUrl} LIMIT 1`;
+      // A previously published segment may still be an ordinary library resource.
+      if (!referenced) deletableKeys.push(key);
+    } catch (err) {
+      // If we cannot verify references, keep the old object rather than risk
+      // breaking a resource that has already been published to the library.
+      console.error('Could not verify old segment references; preserving object', err?.message || String(err));
+    }
+  }
+  if (deletableKeys.length) {
+    await Promise.allSettled(deletableKeys.map((key) => storage.deleteObject(key)));
+  }
+
+  try {
+    await sql`INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details)
+      VALUES('pdf_split','admin','resource',${resourceId},${JSON.stringify({page_count:pageCount,segments:uploaded.length})}::jsonb)`;
+  } catch (err) {
+    // Audit logging should not invalidate files that were already saved successfully.
+    console.error('PDF split audit log failed', err?.message || String(err));
+  }
+
+  return c.json({ source_resource_id: resourceId, source_pages: pageCount, original_preserved: true,
+    segments: uploaded.map(({index,title,unit_id,start,end,url,bytes})=>({index,title,unit_id,page_start:start,page_end:end,url,size_bytes:bytes})),
+    note: 'Generated PDFs are stored in private B2 and linked to reviewable segment records. The original file was not changed.' });
+});
+
+/**
+ * Admin-only: publish generated segment PDFs as normal library resources.
+ * This is deliberately a separate approval action; splitting alone never
+ * makes derived files public in the ordinary library listing.
+ */
+ai.post('/publish-segments/:resourceId', async (c) => {
+  if (!authorized(c)) return c.json({ error: 'admin authorization required' }, 401);
+  const sourceId = c.req.param('resourceId');
+  if (!/^\d+$/.test(sourceId)) return c.json({ error: 'invalid resource id' }, 400);
+
+  const sql = await getDb(c.env);
+  const storage = getStorage(c.env);
+  const [source] = await sql`
+    SELECT id, type, academic_year, uploader_name, is_flagged
+    FROM resources WHERE id=${sourceId}
+  `;
+  if (!source || source.is_flagged) return c.json({ error: 'source resource not found or not available' }, 404);
+
+  const segments = await sql`
+    SELECT ds.id, ds.segment_index, ds.unit_id, ds.title, ds.page_start, ds.page_end,
+      ds.generated_file_key, u.code_display AS unit_code, u.title AS unit_title
+    FROM document_segments ds
+    JOIN units u ON u.id=ds.unit_id
+    WHERE ds.resource_id=${sourceId} AND ds.status='generated'
+      AND ds.generated_file_key IS NOT NULL
+    ORDER BY ds.segment_index
+  `;
+  if (!segments.length) {
+    return c.json({ error: 'no generated segments found; split and review the source first' }, 404);
+  }
+
+  const published = [];
+  for (const seg of segments) {
+    try {
+      const bytes = await storage.getObject(seg.generated_file_key);
+      const hash = await sha256Hex(bytes);
+      const [existing] = await sql`
+        SELECT rf.resource_id AS id, r.title
+        FROM resource_files rf JOIN resources r ON r.id=rf.resource_id
+        WHERE rf.file_hash=${hash} LIMIT 1
+      `;
+      if (existing) {
+        published.push({
+          segment_id: seg.id, resource_id: existing.id, title: existing.title,
+          already_published: true,
+        });
+        continue;
+      }
+
+      const fileName = `segment-${sourceId}-${seg.segment_index}-pages-${seg.page_start}-${seg.page_end}.pdf`;
+      const title = String(seg.title || `${seg.unit_code} pages ${seg.page_start}-${seg.page_end}`).slice(0, 200);
+      const fileUrl = `/api/files/${String(seg.generated_file_key).split('/').map(encodeURIComponent).join('/')}`;
+      const contentHash = hash;
+      const [created] = await sql`
+        WITH inserted AS (
+          INSERT INTO resources
+            (unit_id,type,note_scope,topics,academic_year,title,original_title,uploader_name,note,
+             file_count,primary_ext,content_hash,processing_status,preview_snippet)
+          VALUES
+            (${seg.unit_id},${source.type},'complete',ARRAY[]::text[],
+             ${source.academic_year},${title},${title},'Communitylib split',
+             ${`Extracted from resource ${sourceId}, pages ${seg.page_start}-${seg.page_end}. Original preserved.`},
+             1,'pdf',${contentHash},'ready',
+             ${`Pages ${seg.page_start}-${seg.page_end} from ${seg.unit_title || seg.unit_code}`})
+          RETURNING id
+        ),
+        inserted_file AS (
+          INSERT INTO resource_files
+            (resource_id,order_index,file_name,file_url,file_ext,file_size_bytes,file_hash,mime_type,display_name,processing_status)
+          SELECT inserted.id,0,${fileName},${fileUrl},'pdf',${bytes.byteLength},${hash},
+            'application/pdf',${title},'ready'
+          FROM inserted
+          RETURNING resource_id
+        ),
+        updated_unit AS (
+          UPDATE units SET resource_count=resource_count+1 WHERE id=${seg.unit_id}
+          RETURNING id
+        )
+        SELECT inserted.id FROM inserted
+        JOIN inserted_file ON inserted_file.resource_id=inserted.id
+        JOIN updated_unit ON updated_unit.id=${seg.unit_id}
+      `;
+      if (!created) throw new Error('failed to create library resource');
+      published.push({
+        segment_id: seg.id, resource_id: created.id, title,
+        unit_code: seg.unit_code, already_published: false,
+      });
+    } catch (err) {
+      console.error('segment publish failed', { segmentId: seg.id, message: err?.message || String(err) });
+      return c.json({
+        error: 'segment publishing stopped; already-published items are safe to retry',
+        published,
+        failed_segment_id: seg.id,
+      }, 500);
+    }
+  }
+
+  await sql`
+    INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details)
+    VALUES('pdf_segments_published','admin','resource',${sourceId},
+      ${JSON.stringify({published_count:published.length})}::jsonb)
+  `;
+  return c.json({
+    source_resource_id: sourceId,
+    published_count: published.length,
+    published,
+    note: 'Generated segments are now ordinary library resources. Repeating this request will not duplicate files with the same content hash.',
+  });
 });
 
 /** Admin-only PDF merge for resources from the same unit and same resource type. */
