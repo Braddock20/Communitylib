@@ -1,0 +1,6 @@
+Electric charge is a conserved quantity. Like charges repel and unlike charges attract.
+Coulomb's law gives the force between two point charges in a vacuum.
+The electric field of a point charge points radially away from a positive charge.
+Gauss's law relates the electric flux through a closed surface to the enclosed charge.
+A capacitor stores energy in the electric field between its plates.
+Magnetic fields are produced by moving charges and by changing electric fields.
