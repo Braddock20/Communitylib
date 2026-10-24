@@ -1,12 +1,12 @@
 {
   "name": "communitylib",
-  "version": "4.2.0",
+  "version": "4.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test"
+    "test": "node --import ./test/helpers/register-stubs.mjs --test"
   },
   "dependencies": {
     "hono": "4.13.13",
