@@ -9,6 +9,8 @@ import comments from './routes/comments.js';
 import files from './routes/files.js';
 import ai from './routes/ai.js';
 import { resolveDb } from './db.js';
+import { createProcessingRouter, recoverStale } from './routes/processing.js';
+import { handleMcpRequest, MCP_TOOLS } from './lib/mcp.js';
 
 
 const app = new Hono();
@@ -78,7 +80,7 @@ app.use(
 app.get('/', (c) => c.json({
   ok: true,
   app: c.env.APP_NAME || 'UoE Student Resources API',
-  version: c.env.APP_VERSION || '4.1.0',
+  version: c.env.APP_VERSION || '4.3.0',
 }));
 
 // Liveness: deliberately does not touch the database. If this 503s, the
@@ -125,6 +127,30 @@ app.use('/api/feed/*', limitedBy('PUBLIC_SEARCH_LIMITER'));
 app.use('/api/files/*', limitedBy('PUBLIC_FILE_LIMITER'));
 app.use('/api/resource/:id/comments', limitedBy('PUBLIC_COMMENT_LIMITER'));
 
+// Document-processing API (framework-free router, see src/routes/processing.js).
+// Public reads share the search limiter; admin/lease routes share the file limiter
+// (page submissions and heartbeats are frequent, so the 10/min AI limiter would be too tight).
+app.use('/api/search/content', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/resource/:id/pages', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/resource/:id/pages/*', limitedBy('PUBLIC_SEARCH_LIMITER'));
+app.use('/api/ai/jobs', limitedBy('PUBLIC_FILE_LIMITER'));
+app.use('/api/ai/jobs/*', limitedBy('PUBLIC_FILE_LIMITER'));
+app.use('/api/ai/runs/*', limitedBy('PUBLIC_FILE_LIMITER'));
+app.use('/api/ai/processing/*', limitedBy('PUBLIC_FILE_LIMITER'));
+const processing = createProcessingRouter();
+const PROCESSING_PATHS = [
+  /^\/api\/ai\/(processing|jobs|runs)(\/|$)/,
+  /^\/api\/ai\/resources\/\d+\/runs\/?$/,
+  /^\/api\/resource\/\d+\/pages(\/\d+)?\/?$/,
+  /^\/api\/search\/content\/?$/,
+];
+app.use('*', async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (c.req.method === 'OPTIONS' || !PROCESSING_PATHS.some((re) => re.test(path))) return next();
+  const res = await processing.handle(c.req.raw, c.env, c.executionCtx);
+  return res || next();
+});
+
 app.route('/api/upload', upload);
 app.route('/api/search', search);
 app.route('/api/feed', feed);
@@ -133,6 +159,24 @@ app.route('/api/resource', resource);
 app.route('/api/resource', comments);
 app.route('/api/files', files);
 app.route('/api/ai', ai);
+
+// Remote, stateless MCP endpoint. Compatible clients can POST JSON-RPC
+// initialize/tools/list/tools/call requests to /mcp. Internal dispatch keeps
+// business logic in the existing API routes rather than duplicating it.
+app.use('/mcp', limitedBy('MCP_LIMITER'));
+app.post('/mcp', (c) => handleMcpRequest(c.req.raw, (path, init) => {
+  const internalRequest = new Request(new URL(path, c.req.url), init);
+  return app.fetch(internalRequest, c.env, c.executionCtx);
+}));
+app.get('/mcp', (c) => c.json({
+  name: 'CommunityLib AI Library Manager',
+  version: c.env.APP_VERSION || '4.3.0',
+  protocol: 'MCP Streamable HTTP (stateless JSON-RPC POST)',
+  endpoint: new URL('/mcp', c.req.url).href,
+  auth: 'Read tools are public; administrative tools require Authorization: Bearer <ADMIN_API_KEY>.',
+  setup: 'Add this remote MCP URL in an MCP-compatible AI client. Clients that cannot connect to remote MCP can use AI_LIBRARY_GUIDE.md and the regular REST API.',
+  tools: MCP_TOOLS.map(({ name, description }) => ({ name, description })),
+}));
 
 app.notFound((c) => c.json({ error: 'not found' }, 404));
 
@@ -157,4 +201,10 @@ app.onError((err, c) => {
   return c.json(body, 500);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  // Cron: re-queue jobs whose browser/processor stopped reporting (closed tab, crash).
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(recoverStale(env).catch((e) => console.error('stale recovery failed', e?.message || String(e))));
+  },
+};
