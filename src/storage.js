@@ -17,6 +17,7 @@ function objectPath(key) {
 }
 
 export function getStorage(env) {
+  if (env && env.__storage) return env.__storage; // test hook
   const endpoint = cleanBaseUrl(required(env, 'B2_ENDPOINT'));
   const bucket = required(env, 'B2_BUCKET');
   const region = String(env.B2_REGION || 'us-west-000').trim();
