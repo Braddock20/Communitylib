@@ -26,10 +26,10 @@ compatibility_flags = ["nodejs_compat"]
 MAX_FILE_SIZE_MB = "25"
 MAX_FILES_PER_UPLOAD = "20"
 MAX_TOTAL_UPLOAD_MB = "25"
-APP_VERSION = "4.2.0"
-AI_PUBLIC_ENABLED = "true"
-PDF_PROCESSING_ENABLED = "true"
-IMAGE_PDF_COMBINE_ENABLED = "true"
+APP_VERSION = "4.3.0"
+AI_PUBLIC_ENABLED = "false"
+PDF_PROCESSING_ENABLED = "false"
+IMAGE_PDF_COMBINE_ENABLED = "false"
 AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
 APP_NAME = "University of Eldoret Student Resources"
 
@@ -38,6 +38,16 @@ APP_NAME = "University of Eldoret Student Resources"
 # communitylib -> Settings -> Domains & Routes -> Add -> Custom Domain.
 # The UI only lets you pick a zone that already exists on your account,
 # which avoids a "Could not find zone" deploy failure.
+
+# Re-queues processing jobs whose worker stopped reporting (needs 1 of the 5 free cron triggers).
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Admin console (static). /api/* and /health* still go to the Worker first.
+[assets]
+directory = "./frontend/console"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/health", "/health/*"]
 
 [observability]
 enabled = true
@@ -98,6 +108,8 @@ name = "PUBLIC_FILE_LIMITER"
 namespace_id = "2004"
 simple = { limit = 120, period = 60 }
 
-[assets]
-directory = "./frontend"
-
+# Remote MCP requests can make several tool calls per conversation.
+[[ratelimits]]
+name = "MCP_LIMITER"
+namespace_id = "1004"
+simple = { limit = 60, period = 60 }
