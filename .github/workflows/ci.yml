@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGTEST_URL: postgres://postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install --no-audit --no-fund   # no lockfile yet: commit package-lock.json, then switch to `npm ci`
+      - run: node scripts/sync-shared.mjs --check
+      - run: npm test
+      - run: node --import ./test/helpers/register-stubs.mjs scripts/verify-migration.mjs
+      - run: npx wrangler deploy --dry-run --outdir /tmp/wrangler-out
