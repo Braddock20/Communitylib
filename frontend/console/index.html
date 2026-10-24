@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Communitylib Processing Console</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#15181d;--mut:#5b6573;--card:#fff;--bd:#d9dee5;--acc:#0b5fff;--ok:#0a7f3f;--warn:#a65f00;--bad:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#101318;--fg:#e8ebf0;--mut:#9aa5b4;--card:#181c23;--bd:#2b323d;--acc:#6ea0ff;--ok:#4cc27f;--warn:#e0a24a;--bad:#ff8a80}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
+header{padding:12px 16px;border-bottom:1px solid var(--bd);background:var(--card);position:sticky;top:0;z-index:2}
+h1{font-size:17px;margin:0}main{max-width:900px;margin:0 auto;padding:12px 16px 64px}
+nav{display:flex;gap:6px;overflow-x:auto;margin:10px 0}
+nav button{flex:none}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin:10px 0}
+button,input,select,textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:9px 12px;min-height:44px}
+button{cursor:pointer}button.p{background:var(--acc);color:#fff;border-color:var(--acc)}button.on{border-color:var(--acc);font-weight:600}
+button:disabled{opacity:.5}
+input,select,textarea{width:100%}label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1 1 140px}
+.mut{color:var(--mut);font-size:13px}.tag{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--bd);font-size:12px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+progress{width:100%;height:10px}pre{white-space:pre-wrap;word-break:break-word;margin:6px 0;font:13px/1.4 ui-monospace,monospace}
+mark{background:#ffe27a;color:#000}.hide{display:none}
+</style>
+</head>
+<body>
+<header><h1>Processing Console</h1><div class="mut" id="who">Locked — enter the admin key. It is kept in memory only and is gone when you close the tab.</div></header>
+<main>
+<section class="card" id="auth">
+  <label for="key">Admin key</label>
+  <div class="row"><input id="key" type="password" autocomplete="off" placeholder="ADMIN_API_KEY"><button class="p" id="unlock">Unlock</button></div>
+  <div class="mut" id="authmsg"></div>
+</section>
+<div id="app" class="hide">
+<nav id="tabs"></nav>
+<section id="v-jobs"></section>
+<section id="v-new" class="hide"></section>
+<section id="v-review" class="hide"></section>
+<section id="v-search" class="hide"></section>
+</div>
+</main>
+<!-- Pinned versions. SRI hashes were not computable when this was written; add integrity= before production (see docs/DEPLOYMENT.md). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js" defer></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
