@@ -401,3 +401,21 @@ New API endpoints:
 - `POST /api/ai/study` — authenticated question answering, summarization, flashcard and quiz generation using stored extracted text.
 
 Run `npm test` before deploying. Apply migrations already present in the hardened project as described in `DEPLOYMENT_CHECKLIST.md`; then configure `ADMIN_API_KEY`. PDF splitting/merging still obeys the existing processing feature flag and 15 MiB source limit. The 20.5 MiB PHY121 file can be extracted in the browser, but it must not be split/merged by the current synchronous Worker PDF processor without a separate safe processing design.
+
+## v4.3.0 — document processing
+Browser-side OCR with a server-side job protocol and page-level search. See `docs/PROTOCOL.md` (contract),
+`docs/DEPLOYMENT.md` (steps, approvals, rollback) and `DELIVERY_REPORT.md` (what was and was not verified).
+Tests: `PGTEST_URL=postgres://postgres@127.0.0.1:5432/postgres npm test` (DB tests need a local Postgres 16).
+
+## Remote AI tools and MCP (v4.3.0)
+
+CommunityLib exposes a stateless remote MCP endpoint at `POST /mcp` for compatible AI clients. It supports MCP JSON-RPC `initialize`, `ping`, `tools/list`, and `tools/call` requests over Streamable HTTP. `GET /mcp` returns a small discovery document; it is not the MCP transport itself.
+
+- Configure the deployed URL ending in `/mcp` as a remote MCP server in an AI client that supports remote MCP.
+- Public read tools include library search, unit-registry search, resource inspection/preview, extracted-content search, and document analysis suggestions.
+- Administrative tools forward the client's `Authorization: Bearer <ADMIN_API_KEY>` header to the existing protected API routes. They fail closed when the key is missing or invalid.
+- MCP requests use the dedicated `MCP_LIMITER` binding (60 requests/minute per client IP). Ensure all rate-limit bindings in `wrangler.toml` are present before deployment.
+- This endpoint is stateless and does not implement the optional server-sent-event GET stream. It is intended for clients that support Streamable HTTP POST requests.
+- A chat that cannot connect to remote MCP cannot be made tool-enabled by uploading a guide alone. Use `AI_LIBRARY_GUIDE.md` for portable instructions and a manifest-based fallback, or use the dedicated web console.
+
+See [`docs/MCP.md`](docs/MCP.md) and [`AI_LIBRARY_GUIDE.md`](AI_LIBRARY_GUIDE.md). Run `npm test` before deployment. MCP protocol behavior is unit-tested without live services; a deployed smoke test is still required.
