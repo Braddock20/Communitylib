@@ -164,8 +164,20 @@ app.route('/api/ai', ai);
 // initialize/tools/list/tools/call requests to /mcp. Internal dispatch keeps
 // business logic in the existing API routes rather than duplicating it.
 app.use('/mcp', limitedBy('MCP_LIMITER'));
+
 app.post('/mcp', (c) => handleMcpRequest(c.req.raw, (path, init) => {
-  const internalRequest = new Request(new URL(path, c.req.url), init);
+  const headers = new Headers(init?.headers);
+  const clientIp = c.req.header('cf-connecting-ip');
+
+  if (clientIp) {
+    headers.set('cf-connecting-ip', clientIp);
+  }
+
+  const internalRequest = new Request(new URL(path, c.req.url), {
+    ...init,
+    headers,
+  });
+
   return app.fetch(internalRequest, c.env, c.executionCtx);
 }));
 app.get('/mcp', (c) => c.json({
