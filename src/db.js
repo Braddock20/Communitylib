@@ -101,6 +101,8 @@ let cachedWorkingSource = null;
  * without exposing it to the public by default.
  */
 export async function resolveDb(env) {
+  // Test hook: integration tests inject a SQL client. Never set in production.
+  if (env && env.__sql) return { sql: env.__sql, source: 'injected', url: '' };
   if (cachedWorkingUrl) {
     return { sql: neon(cachedWorkingUrl), source: cachedWorkingSource, url: cachedWorkingUrl };
   }
