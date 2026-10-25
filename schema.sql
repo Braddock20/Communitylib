@@ -126,7 +126,7 @@ FOR EACH ROW EXECUTE FUNCTION communitylib_sync_resource_topics();
 
 -- ---------- Notes metadata migration / validation ----------
 -- Notes can be either a complete set or topical notes. Topic names are optional
--- for topical notes, and unit_code remains compulsory at upload time.
+-- for topical notes; unit metadata may be inferred by backend classification after upload.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'resources_note_scope_valid') THEN
