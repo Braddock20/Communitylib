@@ -10,6 +10,8 @@ function h(tag, attrs = {}, ...kids) {
 let api = null;
 let current = { runId: null };
 const running = new Map(); // jobId -> AbortController
+let autoQueueEnabled = localStorage.getItem('communitylib.autoRunQueue') !== 'false';
+let autoQueueScheduled = false;
 
 const TABS = [['jobs', 'Jobs'], ['new', 'New job'], ['review', 'Review'], ['search', 'Search']];
 function show(name) {
@@ -37,7 +39,33 @@ async function loadJobs() {
   const box = $('#v-jobs'); box.replaceChildren(h('div', { class: 'mut' }, 'Loading…'));
   await guard(box, async () => {
     const { jobs } = await api.req('/api/ai/jobs?limit=30');
-    box.replaceChildren(h('button', { onclick: loadJobs }, 'Refresh'), ...jobs.map(jobCard), jobs.length ? '' : h('p', { class: 'mut' }, 'No jobs yet. Create one in "New job".'));
+    const toggle = h('input', { type: 'checkbox', checked: autoQueueEnabled, style: 'width:auto;min-height:0', onchange: (ev) => {
+      autoQueueEnabled = ev.target.checked;
+      localStorage.setItem('communitylib.autoRunQueue', String(autoQueueEnabled));
+      loadJobs();
+    } });
+    const controls = h('div', { class: 'row' }, h('button', { onclick: loadJobs }, 'Refresh'), h('label', {}, toggle, ' Auto-process queued jobs on this device'));
+    const status = h('div', { class: 'mut' }, autoQueueEnabled
+      ? 'Queue automation is enabled. Processing runs in this browser while this console stays open; completed runs are not published to search automatically.'
+      : 'Queue automation is paused. Use “Process here” on a job to run it manually.');
+    box.replaceChildren(controls, status, ...jobs.map(jobCard), jobs.length ? '' : h('p', { class: 'mut' }, 'No jobs yet. Create one in "New job".'));
+    const next = jobs.find(j => ['queued', 'retry_wait'].includes(j.state || j.status));
+    if (autoQueueEnabled && next && running.size === 0 && !autoQueueScheduled) {
+      autoQueueScheduled = true;
+      setTimeout(() => {
+        autoQueueScheduled = false;
+        if (!api || !autoQueueEnabled || running.size > 0) return;
+        if (typeof pdfjsLib === 'undefined' || typeof Tesseract === 'undefined') {
+          status.textContent = 'Auto-processing paused: PDF.js / Tesseract.js did not load. Check connectivity, then refresh or process manually.';
+          return;
+        }
+        const progress = h('progress', { max: 1, value: 0 });
+        const log = h('div', { class: 'mut' });
+        const card = h('div', { class: 'card' }, h('strong', {}, `Auto-processing resource ${next.resource_id}`), progress, log);
+        box.insertBefore(card, box.children[2] || null);
+        runJob(next, progress, log, { disabled: false });
+      }, 0);
+    }
   });
 }
 function jobCard(j) {
