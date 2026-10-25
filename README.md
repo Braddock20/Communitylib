@@ -402,6 +402,16 @@ New API endpoints:
 
 Run `npm test` before deploying. Apply migrations already present in the hardened project as described in `DEPLOYMENT_CHECKLIST.md`; then configure `ADMIN_API_KEY`. PDF splitting/merging still obeys the existing processing feature flag and 15 MiB source limit. The 20.5 MiB PHY121 file can be extracted in the browser, but it must not be split/merged by the current synchronous Worker PDF processor without a separate safe processing design.
 
+## v4.4.0 — evidence-based classification and upload queue
+
+- Unit classification now independently checks registered codes, titles, aliases, body-vs-filename conflicts, and deterministic topic hints. Document-body evidence takes precedence over misleading filenames and unsupported model output.
+- Multi-unit results are surfaced as review-required rather than treated as a single certain label. Suggested page ranges remain unvalidated until checked against the actual PDF.
+- Uploads of PDF, TXT, and supported image files attempt to enqueue extraction jobs automatically. If the optional processing schema is missing, the upload remains successful and the response reports that queueing failed.
+- The protected processing console can automatically process queued jobs sequentially while open. This is browser-side extraction/OCR, not an always-on backend OCR service. The console holds the admin key in memory only; automatic processing can be disabled on that device.
+- Completed runs are not automatically activated in public search. Review and activation remain explicit, and the original files are preserved.
+
+Validation on the supplied project archive: 65 tests total, 56 passed, 0 failed, 9 database-backed tests skipped because `PGTEST_URL` was not configured. No production deployment or database changes were made. See `ENGINEERING_RELEASE_4.4.0.md` and `RELEASE_VALIDATION.txt`.
+
 ## v4.3.0 — document processing
 Browser-side OCR with a server-side job protocol and page-level search. See `docs/PROTOCOL.md` (contract),
 `docs/DEPLOYMENT.md` (steps, approvals, rollback) and `DELIVERY_REPORT.md` (what was and was not verified).
@@ -419,3 +429,9 @@ CommunityLib exposes a stateless remote MCP endpoint at `POST /mcp` for compatib
 - A chat that cannot connect to remote MCP cannot be made tool-enabled by uploading a guide alone. Use `AI_LIBRARY_GUIDE.md` for portable instructions and a manifest-based fallback, or use the dedicated web console.
 
 See [`docs/MCP.md`](docs/MCP.md) and [`AI_LIBRARY_GUIDE.md`](AI_LIBRARY_GUIDE.md). Run `npm test` before deployment. MCP protocol behavior is unit-tested without live services; a deployed smoke test is still required.
+
+## CommunityLib 5.0.0 — Cloudflare OCR + ZIP ingestion
+
+The OCR backend now runs as a Cloudflare Container attached to this Worker; there is no Render deployment. It handles PDF text-first extraction, scanned-page OCR, common image formats, Office/OpenDocument conversion through LibreOffice, and text/markup/tabular formats. The `/api/ocr/v1/ingest/archive` endpoint safely unpacks nested ZIPs and uploads each supported member as a normal resource. Existing backend extraction then classifies documents against the verified unit registry and indexes searchable text. Ambiguous files remain unclassified for review rather than being forced into a wrong unit.
+
+Open `/bulk-import.html` from the Processing Console to upload a document or ZIP and watch classification status. See [`processor/README.md`](processor/README.md) for Cloudflare deployment, required secrets, API examples, format coverage and configurable safety limits. Current limits are intentionally bounded by Cloudflare request sizes, container resources, and cost; “no limit” is not technically possible on a finite compute platform.
