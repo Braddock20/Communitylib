@@ -1,0 +1,20 @@
+CommunityLib 4.5.0 release validation
+
+Passed:
+- node --check src/routes/processing.js
+- node --check src/routes/upload.js
+- python -m py_compile processor/app.py
+- npm test: 65 total, 56 passed, 0 failed, 9 skipped
+- 9 skipped tests require PGTEST_URL and a reachable disposable PostgreSQL database.
+
+Not performed:
+- No production Cloudflare deployment from this environment.
+- No live Neon/B2 upload-to-search test.
+- No live Render processor deployment.
+
+Required deployment configuration:
+- Install migrations/006_document_intelligence.sql and prerequisites if not already installed.
+- Deploy Worker code with existing DATABASE_URL/B2/ADMIN_API_KEY secrets preserved.
+- Set encrypted Worker secret PROCESSOR_SHARED_SECRET.
+- Superseded by RELEASE_VALIDATION_5.0.0.txt; Render deployment was removed in CommunityLib 5.0.0.
+- Confirm /health on both services before uploading a real document.
