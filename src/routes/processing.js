@@ -12,6 +12,7 @@ import {
 import { validatePage, parsePageSpec, countWords, sha256Hex as textHash, settingsHash, PAGE_LIMITS } from '../lib/shared/canonical.js';
 import { assessPage, indexDecision, summarizeQuality } from '../lib/shared/textquality.js';
 import { aggregateRun, failureOutcome, dedupeKey, requestHash, normalizeState, PERMANENT_ERROR_CODES, ERROR_GUIDE } from '../lib/jobs/state.js';
+import { classifyDocumentEvidence, inferDocumentType } from '../utils/ai-classification.js';
 
 const LEASE_SECONDS = 120;
 const HEARTBEAT_SECONDS = 30;
@@ -21,9 +22,11 @@ const MODES = {
   standard: { ocr: true, dpi: 200, psm: 3, preprocess: ['grayscale', 'contrast'], timeout_ms: 60000 },
   high: { ocr: true, dpi: 300, psm: 3, preprocess: ['grayscale', 'contrast', 'denoise', 'threshold', 'deskew'], timeout_ms: 120000 },
 };
-// What each executor can do in THIS release. Office/archives need the optional processor (phase 2).
+// Browser processing stays deliberately small; the Cloudflare Container handles heavier formats.
 const BROWSER_KINDS = new Set(['pdf', 'png', 'jpg', 'jpeg', 'webp', 'txt']);
-const MIME = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', txt: 'text/plain; charset=utf-8' };
+const EXTERNAL_KINDS = new Set(['pdf','png','jpg','jpeg','webp','tif','tiff','bmp','gif','txt','md','markdown','csv','tsv','html','htm','json','xml','yaml','yml','log','ini','rtf','doc','docx','ppt','pptx','xls','xlsx','odt','ods','odp','epub','eml']);
+const MIME = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', txt: 'text/plain; charset=utf-8', tif: 'image/tiff', tiff: 'image/tiff', bmp: 'image/bmp', gif: 'image/gif' };
+const EXTERNAL_MIME = Object.fromEntries([...EXTERNAL_KINDS].map((ext) => [ext, ({txt:'text/plain; charset=utf-8',md:'text/markdown',markdown:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',html:'text/html',htm:'text/html',json:'application/json',xml:'application/xml',yaml:'text/yaml',yml:'text/yaml',log:'text/plain',ini:'text/plain',rtf:'application/rtf',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',ppt:'application/vnd.ms-powerpoint',pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',xls:'application/vnd.ms-excel',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',odt:'application/vnd.oasis.opendocument.text',ods:'application/vnd.oasis.opendocument.spreadsheet',odp:'application/vnd.oasis.opendocument.presentation',epub:'application/epub+zip',eml:'message/rfc822'})[ext] || MIME[ext] || 'application/octet-stream']));
 
 function keyFromUrl(fileUrl) {
   const marker = '/api/files/';
@@ -77,13 +80,13 @@ export function createProcessingRouter() {
 
   // ------------------------------------------------------------ capabilities (public, no secrets)
   r.add('GET', '/api/ai/processing/capabilities', async (c) => json({
-    release: '4.3.0',
-    executors: { browser: { available: true, kinds: [...BROWSER_KINDS], note: 'PDF.js text layer + Tesseract.js OCR in the admin console' },
-      external: { available: false, note: 'optional processor not enabled in this release configuration' },
+    release: '4.4.0',
+    executors: { browser: { available: true, kinds: [...BROWSER_KINDS], note: 'legacy manual processor' },
+      external: { available: Boolean(c.env.PROCESSOR_SHARED_SECRET), kinds: [...EXTERNAL_KINDS], note: 'Cloudflare Container: OCR, Office conversion and text extraction' },
       worker: { available: false, note: 'Workers Free CPU budget is too small for document parsing' } },
     operations: OPERATIONS, modes: MODES,
     limits: { max_pages_per_submission: PAGE_LIMITS.maxPagesPerSubmission, max_pages_per_run: PAGE_LIMITS.maxPagesPerRun, max_text_chars_per_page: PAGE_LIMITS.maxTextChars },
-    unsupported_in_this_release: ['docx', 'xlsx', 'pptx', 'doc', 'xls', 'ppt', 'zip', 'csv', 'html'],
+    unsupported_in_this_release: ['zip as a single resource (use /api/ocr/v1/ingest/archive; nested ZIPs are unpacked safely)'],
     math: 'Equation regions are flagged for review; no LaTeX is generated or verified automatically.',
   }));
 
@@ -107,8 +110,8 @@ export function createProcessingRouter() {
     if (!OPERATIONS.includes(operation)) throw new HttpError(400, 'invalid_operation', `operation must be one of ${OPERATIONS.join(', ')}`);
     if (!MODES[mode]) throw new HttpError(400, 'invalid_mode', `mode must be one of ${Object.keys(MODES).join(', ')}`);
     if (!validId(body.resource_id)) throw new HttpError(400, 'invalid_resource_id', 'resource_id required');
-    const executor = String(body.executor || 'browser');
-    if (executor !== 'browser') throw new HttpError(400, 'executor_not_available', 'only the browser executor is enabled in this release');
+    const executor = String(body.executor || 'external');
+    if (!['browser', 'external'].includes(executor) || (executor === 'external' && !c.env.PROCESSOR_SHARED_SECRET)) throw new HttpError(400, 'executor_not_available', 'requested processor is not configured');
     const languages = Array.isArray(body.languages) && body.languages.length ? body.languages.map((l) => String(l).replace(/[^a-z_]/gi, '').slice(0, 8)).filter(Boolean).slice(0, 4) : ['eng'];
     let pages = null;
     if (body.pages != null && body.pages !== '') {
@@ -124,7 +127,8 @@ export function createProcessingRouter() {
     else throw new HttpError(409, 'file_id_required', 'resource has several files; specify file_id');
     if (!file) throw new HttpError(404, 'file_not_found', 'file not found in this resource');
     const ext = String(file.file_ext).toLowerCase();
-    if (!BROWSER_KINDS.has(ext)) throw new HttpError(422, 'UNSUPPORTED_FORMAT', `.${ext} files cannot be processed by the browser executor in this release`, { guide: ERROR_GUIDE.UNSUPPORTED_FORMAT });
+    const supportedKinds = executor === 'external' ? EXTERNAL_KINDS : BROWSER_KINDS;
+    if (!supportedKinds.has(ext)) throw new HttpError(422, 'UNSUPPORTED_FORMAT', `.${ext} files cannot be processed by the selected executor`, { guide: ERROR_GUIDE.UNSUPPORTED_FORMAT });
 
     const settings = { mode, languages, ...MODES[mode], pages, activate: Boolean(body.activate), ...(body.run_id ? { run_id: String(body.run_id) } : {}) };
     const dKey = await dedupeKey({ resource_id: body.resource_id, file_id: file.id, operation, settings: { mode, languages }, pages });
@@ -133,7 +137,7 @@ export function createProcessingRouter() {
 
     const [created] = await sql`
       INSERT INTO document_processing_jobs(resource_id,file_id,job_type,operation,executor,status,input_json,settings,dedupe_key,idempotency_key,request_hash,requested_by,request_id,pages_total)
-      VALUES(${body.resource_id},${file.id},${operation},${operation},'browser','queued',${JSON.stringify({ source_sha256: file.file_hash })}::jsonb,${JSON.stringify(settings)}::jsonb,
+      VALUES(${body.resource_id},${file.id},${operation},${operation},${executor},'queued',${JSON.stringify({ source_sha256: file.file_hash })}::jsonb,${JSON.stringify(settings)}::jsonb,
         ${dKey},${idem},${rHash},${actor.actor},${c.requestId},${pages ? pages.length : null})
       ON CONFLICT DO NOTHING RETURNING *`;
     if (created) {
@@ -186,11 +190,15 @@ export function createProcessingRouter() {
     const token = randomToken();
     const hash = await sha256Hex(token);
     const clientName = String(body.client?.name || 'browser').slice(0, 60);
+    const executor = String(body.executor || body.client?.executor || 'browser');
+    if (!['browser','external'].includes(executor)) throw new HttpError(400, 'invalid_executor', 'invalid processor executor');
+    if (executor === 'external' && !c.env.PROCESSOR_SHARED_SECRET) throw new HttpError(503, 'processor_not_configured', 'backend processor is not configured');
+    if (executor === 'external' && c.req.header('x-processor-key') !== c.env.PROCESSOR_SHARED_SECRET) throw new HttpError(401, 'processor_unauthorized', 'backend processor authentication failed');
     const [job] = await sql`
       UPDATE document_processing_jobs SET status='running', attempts=attempts+1, started_at=COALESCE(started_at, now()),
         lease_token_hash=${hash}, lease_expires_at=now() + make_interval(secs => ${LEASE_SECONDS}), heartbeat_at=now(),
         leased_by=${clientName}, stage='claimed', updated_at=now(), error_code=NULL, error_message=NULL
-      WHERE id=${c.params.id}::uuid AND cancel_requested_at IS NULL AND executor='browser'
+      WHERE id=${c.params.id}::uuid AND cancel_requested_at IS NULL AND executor=${executor}
         AND ((status IN ('queued','retry_wait') AND (next_attempt_at IS NULL OR next_attempt_at <= now()))
              OR (status='running' AND lease_expires_at < now()))
       RETURNING *`;
@@ -199,7 +207,7 @@ export function createProcessingRouter() {
       if (!cur) throw new HttpError(404, 'not_found', 'job not found');
       throw new HttpError(409, 'not_claimable', `job is ${cur.status}${cur.cancel_requested_at ? ' (cancel requested)' : ''}`);
     }
-    await sql`INSERT INTO job_attempts(job_id,attempt_no,executor,client) VALUES(${job.id},${job.attempts},'browser',${clientName}) ON CONFLICT (job_id, attempt_no) DO NOTHING`;
+    await sql`INSERT INTO job_attempts(job_id,attempt_no,executor,client) VALUES(${job.id},${job.attempts},${executor},${clientName}) ON CONFLICT (job_id, attempt_no) DO NOTHING`;
 
     const [file] = await sql`SELECT id, file_name, file_ext, file_size_bytes, file_hash FROM resource_files WHERE id=${job.file_id}`;
     if (!file) throw new HttpError(404, 'file_not_found', 'file no longer exists');
@@ -208,7 +216,7 @@ export function createProcessingRouter() {
       const sh = await settingsHash({ mode: job.settings.mode, languages: job.settings.languages });
       const [run] = await sql`
         INSERT INTO extraction_runs(resource_id,file_id,job_id,source_sha256,source_size,source_kind,executor,extractor,extractor_version,settings,settings_hash,created_by)
-        VALUES(${job.resource_id},${file.id},${job.id},${file.file_hash},${file.file_size_bytes},${String(file.file_ext).toLowerCase()},'browser',
+        VALUES(${job.resource_id},${file.id},${job.id},${file.file_hash},${file.file_size_bytes},${String(file.file_ext).toLowerCase()},${executor},
           ${String(body.client?.extractor || 'pdfjs+tesseract.js').slice(0, 60)},${String(body.client?.version || 'unknown').slice(0, 40)},
           ${JSON.stringify({ mode: job.settings.mode, languages: job.settings.languages, dpi: job.settings.dpi, psm: job.settings.psm, preprocess: job.settings.preprocess })}::jsonb,
           ${sh},${actor.actor}) RETURNING id`;
@@ -242,7 +250,7 @@ export function createProcessingRouter() {
     if (!upstream.ok && upstream.status !== 206) throw new HttpError(502, 'storage_unavailable', 'source file unavailable');
     const h = new Headers();
     for (const n of ['content-length', 'content-range', 'accept-ranges']) { const v = upstream.headers.get(n); if (v) h.set(n, v); }
-    h.set('content-type', MIME[String(file.file_ext).toLowerCase()] || 'application/octet-stream');
+    h.set('content-type', EXTERNAL_MIME[String(file.file_ext).toLowerCase()] || MIME[String(file.file_ext).toLowerCase()] || 'application/octet-stream');
     h.set('x-content-type-options', 'nosniff');
     h.set('cache-control', 'private, no-store');
     return new Response(upstream.body, { status: upstream.status, headers: h });
@@ -340,8 +348,48 @@ export function createProcessingRouter() {
       sql`UPDATE job_attempts SET finished_at=now(), outcome=${agg.status === 'completed' ? 'success' : agg.status === 'partial' ? 'partial' : 'failed'},
           error_code=${agg.status === 'failed' ? agg.code : null}, duration_ms=(extract(epoch FROM (now()-started_at))*1000)::int WHERE job_id=${job.id} AND attempt_no=${job.attempts}`,
     ]);
+    // Deterministic classification runs on the server from persisted extracted text.
+    // Only a single strong body match may change the canonical unit; multi-unit and
+    // weak cases retain the uploader's fallback and are surfaced for review.
+    if (agg.status !== 'failed') {
+      try {
+        const [resource] = await sql`SELECT id, title, type, academic_year, unit_id FROM resources WHERE id=${job.resource_id}`;
+        const [file] = await sql`SELECT file_name FROM resource_files WHERE id=${job.file_id}`;
+        const pageRows = await sql`SELECT text FROM extraction_pages WHERE run_id=${run.id} AND status IN ('ok','low_text') ORDER BY page_number`;
+        const documentText = pageRows.map((p) => p.text || '').join('\n').slice(0, 250000);
+        const registry = await sql`SELECT u.id, u.code, u.code_display, u.title, COALESCE(a.aliases, ARRAY[]::text[]) AS aliases
+          FROM units u LEFT JOIN (SELECT unit_id, array_agg(alias ORDER BY alias) AS aliases FROM unit_aliases GROUP BY unit_id) a ON a.unit_id=u.id
+          WHERE u.code <> 'UNCLASSIFIED' ORDER BY u.code`;
+        const classification = classifyDocumentEvidence({ text: documentText, filename: file?.file_name || resource?.title || '', registry });
+        const inferredType = inferDocumentType(documentText, file?.file_name || resource?.title || '');
+        const primary = classification.primary_unit;
+        const mayAssignUnit = !classification.multi_unit && primary && ['strong','moderate'].includes(classification.evidence_tier) && classification.evidence_tier === 'strong';
+        const type = ['notes','cat','exam','assignment','other'].includes(inferredType) ? inferredType : resource.type;
+        const topics = classification.topics || [];
+        const filenameYear = String(file?.file_name || '').match(/\b(19\d{2}|20\d{2})\b/);
+        const bodyYear = ['cat', 'exam'].includes(type) ? documentText.match(/\b(19\d{2}|20\d{2})\b/) : null;
+        const yearMatch = filenameYear || bodyYear;
+        const inferredYear = yearMatch ? Number(yearMatch[1]) : resource.academic_year;
+        if (mayAssignUnit) {
+          await sql`UPDATE resources SET unit_id=${primary.id}, type=${type}::resource_type,
+            academic_year=${inferredYear}, topics=${topics},
+            title=CASE WHEN title LIKE 'Unclassified - %' THEN ${String(file?.file_name || resource.title).replace(/\.[^.]+$/, '').slice(0,180)} ELSE title END
+            WHERE id=${job.resource_id}`;
+          await sql`UPDATE units SET resource_count=GREATEST(0, resource_count-1) WHERE id=${resource.unit_id} AND id <> ${primary.id}`;
+          await sql`UPDATE units SET resource_count=(SELECT count(*)::int FROM resources WHERE unit_id=${primary.id}) WHERE id=${primary.id}`;
+        } else {
+          await sql`UPDATE resources SET type=${type}::resource_type, academic_year=${inferredYear}, topics=${topics} WHERE id=${job.resource_id}`;
+        }
+        await sql`INSERT INTO ai_audit_log(action,actor,entity_type,entity_id,details)
+          VALUES('document_classified','backend-processor','resource',${String(job.resource_id)},${JSON.stringify({detected_units:classification.detected_units,primary_unit:classification.primary_unit?.code || null,multi_unit:classification.multi_unit,evidence_tier:classification.evidence_tier,filename_conflict:classification.filename_conflict,topics:classification.topics,type,academic_year:inferredYear,assigned_unit:Boolean(mayAssignUnit)})}::jsonb)`;
+      } catch (classificationError) {
+        console.error('post-extraction classification failed', { job_id: job.id, message: classificationError?.message || String(classificationError) });
+      }
+    }
+    await sql`UPDATE resources SET processing_status=${agg.status === 'failed' ? 'failed' : agg.status === 'partial' ? 'needs_review' : 'ready'} WHERE id=${job.resource_id}`;
+    await sql`UPDATE resource_files SET processing_status=${agg.status === 'failed' ? 'failed' : agg.status === 'partial' ? 'needs_review' : 'ready'} WHERE id=${job.file_id}`;
     let activated = false;
-    if (job.settings?.activate && agg.status !== 'failed') {
+    if ((job.settings?.activate || job.executor === 'external') && agg.status !== 'failed') {
       const [hasActive] = await sql`SELECT 1 AS x FROM extraction_runs WHERE file_id=${run.file_id} AND is_active`;
       if (!hasActive) { await activateRun(sql, run.id, { actor: 'admin', role: 'admin' }, c); activated = true; }
     }
@@ -368,6 +416,10 @@ export function createProcessingRouter() {
           WHERE job_id=${job.id} AND attempt_no=${job.attempts}`,
       sql`UPDATE extraction_runs SET status=${out.status === 'failed' ? 'failed' : 'running'}, error_code=${out.status === 'failed' ? code : null} WHERE id=${job.run_id}`,
     ]);
+    if (out.status === 'failed') {
+      await sql`UPDATE resources SET processing_status='failed' WHERE id=${job.resource_id}`;
+      await sql`UPDATE resource_files SET processing_status='failed' WHERE id=${job.file_id}`;
+    }
     const [j] = await sql`SELECT * FROM document_processing_jobs WHERE id=${job.id}`;
     return json({ job: publicJob(j), guide: ERROR_GUIDE[code] || null });
   });
