@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>CommunityLib · Bulk Import</title>
+<style>
+:root{color-scheme:light dark;--bg:#101318;--panel:#181c23;--text:#e8ebf0;--muted:#9aa5b4;--border:#2b323d;--accent:#6ea0ff;--good:#4cc27f;--warn:#e0a24a;--bad:#ff8a80}
+@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--text:#15181d;--muted:#5b6573;--border:#d9dee5;--accent:#0b5fff;--good:#0a7f3f;--warn:#a65f00;--bad:#b3261e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,sans-serif}header{padding:16px;border-bottom:1px solid var(--border);background:var(--panel)}main{max-width:900px;margin:auto;padding:16px 14px 60px}h1{font-size:19px;margin:0}h2{font-size:16px;margin:0 0 10px}.muted{color:var(--muted);font-size:13px}.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:15px;margin:12px 0}label{display:block;color:var(--muted);font-size:13px;margin:10px 0 5px}input,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:11px 12px;min-height:44px;width:100%}button{cursor:pointer}button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:650}button:disabled{opacity:.55;cursor:wait}.row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.row button{width:auto;min-width:100px}.status{padding:10px 12px;border-radius:9px;background:var(--bg);border:1px solid var(--border);white-space:pre-wrap;overflow-wrap:anywhere}.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.filebox{border:1px dashed var(--border);border-radius:10px;padding:12px}.result{border-top:1px solid var(--border);padding:12px 0}.result:first-child{border-top:0}.result strong{display:block;overflow-wrap:anywhere}.pill{display:inline-block;border:1px solid var(--border);border-radius:99px;padding:2px 8px;font-size:12px;margin:3px 5px 3px 0}.hidden{display:none}a{color:var(--accent)}progress{width:100%;height:9px;margin:8px 0}code{overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<header><h1>CommunityLib · Bulk Import</h1><div class="muted">Cloudflare OCR · ZIP bundles · automatic unit classification</div></header>
+<main>
+<section class="card">
+<h2>1. Connect to your Worker</h2>
+<label for="base">Worker API base URL</label><input id="base" value="" placeholder="https://communitylib.talesapi.workers.dev" autocomplete="url">
+<label for="key">Admin API key</label><div class="row"><input id="key" type="password" autocomplete="off" placeholder="ADMIN_API_KEY"><button id="connect" class="primary">Connect</button></div>
+<p class="muted">The key stays in this tab's memory and is never saved to local storage. Close the tab to discard it. Do not share this page with your key visible.</p>
+<div id="connection" class="status">Not connected.</div>
+<div id="capabilities" class="muted"></div>
+</section>
+<section class="card">
+<h2>2. Upload a document or ZIP bundle</h2>
+<div class="filebox"><label for="file">Choose a supported document or .zip archive</label><input id="file" type="file" accept=".zip,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.odt,.ods,.odp,.rtf,.txt,.md,.markdown,.csv,.tsv,.html,.htm,.json,.xml,.yaml,.yml,.log,.ini,.epub,.eml,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp,.gif"><div id="fileinfo" class="muted">ZIP bundles may contain nested ZIPs and mixed document formats.</div></div>
+<label for="archiveHint">Import note (optional, saved with imported resources)</label><input id="archiveHint" placeholder="e.g. Year 2 semester 1 resources">
+<button id="upload" class="primary" disabled>Upload and process</button>
+<p class="muted">ZIP guardrails: up to 90 MB compressed, 5,000 entries, 4 GB expanded, 2,000 imported files and 25 MB per extracted file. Cloudflare account limits still apply. Originals remain in B2; ambiguous unit matches stay unclassified for review.</p>
+<div id="uploadstatus" class="status">Connect first, then choose a file.</div>
+<progress id="progress" class="hidden" max="100" value="0"></progress>
+</section>
+<section class="card">
+<h2>3. Import results</h2><div class="muted">Uploaded files enter the existing extraction queue. This page follows their jobs and refreshes each resource's unit assignment when processing completes.</div>
+<div id="results"><div class="muted">No uploads yet.</div></div>
+</section>
+<p class="muted"><a href="/">Back to CommunityLib</a> · <a href="/api/ocr/health">OCR edge health</a></p>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let adminKey = '';
+  let base = '';
+  let connected = false;
+  let resourceResults = [];
+  const setStatus = (id, text, cls='') => { const el=$(id); el.textContent=text; el.className='status '+cls; };
+  const authHeaders = () => ({Authorization:`Bearer ${adminKey}`});
+  const api = path => base.replace(/\/$/,'') + path;
+  async function jsonFetch(url, options={}) {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    let data; try { data = text ? JSON.parse(text) : {}; } catch { data = {message:text}; }
+    if (!response.ok) throw new Error(data.detail?.message || data.message || data.error || `HTTP ${response.status}`);
+    return data;
+  }
+  async function connect() {
+    base = $('base').value.trim().replace(/\/$/,'') || location.origin;
+    adminKey = $('key').value.trim();
+    if (!adminKey) { setStatus('connection','Enter the admin key.','bad'); return; }
+    $('connect').disabled = true;
+    try {
+      const health = await jsonFetch(api('/api/ocr/v1/health'), {headers:authHeaders()});
+      if (!health.configured) throw new Error('OCR Container is reachable but its Worker secrets are incomplete. Set ADMIN_API_KEY and PROCESSOR_SHARED_SECRET in Cloudflare.');
+      const caps = await jsonFetch(api('/api/ocr/v1/capabilities'), {headers:authHeaders()});
+      connected = true;
+      $('key').placeholder = 'Connected — key held in memory';
+      $('upload').disabled = false;
+      setStatus('connection',`Connected to ${base}\nOCR engine: ${health.service} v${health.version}\nShard: ${health.shard} · active jobs: ${health.active_jobs}`, 'good');
+      $('capabilities').textContent = `Formats (${caps.formats.length}): ${caps.formats.join(', ')}. Installed OCR languages: ${(caps.ocr.installed_languages||[]).length}.`;
+      $('connect').textContent = 'Reconnect';
+    } catch (e) {
+      connected = false; adminKey=''; $('upload').disabled = true;
+      setStatus('connection',`Connection failed: ${e.message}`,'bad');
+    } finally { $('connect').disabled = false; }
+  }
+  $('connect').addEventListener('click', connect);
+  window.addEventListener('pagehide', () => { adminKey = ''; connected = false; });
+  $('base').value = location.origin;
+  $('file').addEventListener('change', () => {
+    const f=$('file').files[0];
+    $('fileinfo').textContent = f ? `${f.name} · ${(f.size/1024/1024).toFixed(2)} MB${f.name.toLowerCase().endsWith('.zip')?' · archive import':''}` : 'ZIP bundles may contain nested ZIPs and mixed document formats.';
+  });
+  function addResults(items) {
+    resourceResults = items;
+    const root=$('results'); root.replaceChildren();
+    if (!items.length) { root.textContent='No files were uploaded.'; return; }
+    for (const item of items) {
+      const div=document.createElement('div'); div.className='result'; div.dataset.id=item.resource_id || '';
+      const title=document.createElement('strong'); title.textContent=item.filename || item.path || `Resource ${item.resource_id}`; div.append(title);
+      const status=document.createElement('div'); status.className='muted'; status.dataset.status=''; status.textContent=`Resource ${item.resource_id || 'not created'} · ${item.status || 'uploaded'} · awaiting classification`; div.append(status);
+      const meta=document.createElement('div'); meta.dataset.meta=''; meta.className='muted'; meta.textContent=item.path && item.path!==item.filename ? item.path : ''; div.append(meta);
+      root.append(div);
+    }
+  }
+  async function pollResources(items) {
+    const ids=[...new Set(items.map(x=>String(x.resource_id||'')).filter(x=>/^\d+$/.test(x)))];
+    if (!ids.length) return;
+    const progress=$('progress'); progress.classList.remove('hidden');
+    const nodes=new Map([...$('results').children].map(el=>[el.dataset.id,el]));
+    let completed=false;
+    for (let attempt=0;attempt<180;attempt++) {
+      let resources=[];
+      try {
+        const batches=[];
+        for(let i=0;i<ids.length;i+=200) batches.push(ids.slice(i,i+200));
+        const responses=await Promise.all(batches.map(batch=>jsonFetch(api(`/api/ocr/v1/import/status?resource_ids=${batch.join(',')}`),{headers:authHeaders()})));
+        resources=responses.flatMap(r=>r.resources||[]);
+      } catch(e) {
+        setStatus('uploadstatus',`Upload accepted, but status refresh failed: ${e.message}. Retry by refreshing this page or checking the Processing Console.`,'warn');
+        break;
+      }
+      let done=0;
+      for(const r of resources) {
+        const node=nodes.get(String(r.id)); if(!node) continue;
+        const line=node.querySelector('[data-status]');
+        const meta=node.querySelector('[data-meta]');
+        const status=String(r.processing_status||'unknown');
+        const terminal=['ready','needs_review','failed'].includes(status);
+        if(terminal) done++;
+        const year=r.academic_year?` · ${r.academic_year}`:'';
+        line.textContent=`${r.unit_code||'UNCLASSIFIED'} — ${r.unit_title||'Unclassified'}\n${r.title||'Untitled'} · ${r.type||'other'}${year}\nProcessing: ${status}`;
+        line.className='muted '+(status==='ready' && r.unit_code!=='UNCLASSIFIED'?'good':status==='failed'||status==='needs_review'||r.unit_code==='UNCLASSIFIED'?'warn':'');
+        const jobSummary=(r.jobs||[]).map(j=>`${j.status}${j.error_code?` (${j.error_code})`:''}`).join(', ');
+        meta.textContent=jobSummary?`Jobs: ${jobSummary}`:'';
+      }
+      progress.value=Math.round(done/ids.length*100);
+      if(done>=ids.length || resources.length<ids.length) { completed=done>=ids.length; if(completed) break; }
+      await new Promise(r=>setTimeout(r,10000));
+    }
+    progress.classList.add('hidden');
+    if(completed) setStatus('uploadstatus','Processing finished. Review any files still in UNCLASSIFIED or needs_review.','good');
+    else setStatus('uploadstatus','Upload is saved. Some files may still be processing; refresh the page or check the Processing Console later.','warn');
+  }
+  $('upload').addEventListener('click', async () => {
+    if (!connected || !adminKey) { setStatus('uploadstatus','Connect first.','bad'); return; }
+    const file=$('file').files[0]; if (!file) { setStatus('uploadstatus','Choose a file first.','bad'); return; }
+    $('upload').disabled=true; $('progress').classList.remove('hidden'); $('progress').removeAttribute('value');
+    setStatus('uploadstatus',`Uploading ${file.name}…`);
+    try {
+      const isZip=file.name.toLowerCase().endsWith('.zip');
+      const form=new FormData(); form.append('file',file,file.name); form.append('note',$('archiveHint').value.trim());
+      const result=await jsonFetch(api(isZip?'/api/ocr/v1/ingest/archive':'/api/ocr/v1/ingest/file'),{method:'POST',headers:authHeaders(),body:form});
+      const items=isZip?(result.uploaded||[]):[result];
+      addResults(items);
+      const c=result.counts;
+      setStatus('uploadstatus',isZip?`Archive accepted: ${c?.uploaded||items.length} uploaded, ${c?.skipped||0} skipped, ${c?.errors||0} rejected. OCR/classification continues in the backend.`:`File accepted: resource ${result.resource_id}. OCR/classification continues in the backend.`,c?.errors?'warn':'good');
+      await pollResources(items);
+    } catch(e) { setStatus('uploadstatus',`Upload failed: ${e.message}`,'bad'); }
+    finally { $('upload').disabled=false; $('progress').classList.add('hidden'); }
+  });
+})();
+</script>
+</body>
+</html>
