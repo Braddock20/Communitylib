@@ -3,13 +3,16 @@ import { getDb } from '../db.js';
 import { getStorage } from '../storage.js';
 import { sha256Hex, combineHashes, normalizeCode, normalizeText } from '../utils/hash.js';
 import { imagesToPdf, isImageExt, isPdfConvertibleImageExt } from '../utils/pdf.js';
+import { dedupeKey, requestHash } from '../lib/jobs/state.js';
 
 const upload = new Hono();
 
 const VALID_TYPES = new Set(['notes', 'cat', 'exam', 'assignment', 'other']);
 const ALLOWED_EXTS = new Set([
   'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'txt',
-  'jpg', 'jpeg', 'png', 'webp',
+  'jpg', 'jpeg', 'png', 'webp', 'tif', 'tiff', 'bmp', 'gif',
+  'md', 'markdown', 'csv', 'tsv', 'html', 'htm', 'json', 'xml', 'yaml', 'yml', 'log', 'ini', 'rtf',
+  'odt', 'ods', 'odp', 'epub', 'eml',
 ]);
 
 // Postgres SQLSTATE for a unique-constraint violation. resource_files.file_hash
@@ -25,6 +28,10 @@ const MIME_BY_EXT = Object.freeze({
   jpeg: 'image/jpeg',
   png: 'image/png',
   webp: 'image/webp',
+  tif: 'image/tiff', tiff: 'image/tiff', bmp: 'image/bmp', gif: 'image/gif',
+  md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', tsv: 'text/tab-separated-values',
+  html: 'text/html', htm: 'text/html', json: 'application/json', xml: 'application/xml',
+  yaml: 'text/yaml', yml: 'text/yaml', log: 'text/plain', ini: 'text/plain', rtf: 'application/rtf', eml: 'message/rfc822',
 });
 const COMBINE_MAX_FILES = 10;
 const COMBINE_MAX_BYTES = 8 * 1024 * 1024;
@@ -101,9 +108,11 @@ upload.post('/', async (c) => {
       .map((v) => v.slice(0, 120))
   )].slice(0, 30);
 
-  if (!unitCodeRaw || !unitTitle) {
-    return c.json({ error: 'unit_code and unit_title are required' }, 400);
-  }
+  // Unit metadata is optional: backend extraction/classification can assign a registered unit.
+  // Until evidence is strong enough, the resource stays in the Unclassified collection.
+  const hasUnitMetadata = Boolean(unitCodeRaw && unitTitle);
+  const effectiveUnitCode = hasUnitMetadata ? unitCodeRaw.toString() : 'UNCLASSIFIED';
+  const effectiveUnitTitle = hasUnitMetadata ? unitTitle : 'Unclassified uploads';
   if (!['complete', 'topical'].includes(noteScopeRaw)) {
     return c.json({ error: 'note_scope must be complete or topical' }, 400);
   }
@@ -146,24 +155,24 @@ upload.post('/', async (c) => {
     }
   }
 
-  const code = normalizeCode(unitCodeRaw.toString());
+  const code = normalizeCode(effectiveUnitCode);
   if (!code || code.length > 40) return c.json({ error: 'invalid unit_code' }, 400);
 
   // Serialize unit creation for the same logical code/title. The advisory
   // lock is held for the duration of this SQL statement.
-  const unitKey = `${code}:${normalizeText(unitTitle)}`;
+  const unitKey = `${code}:${normalizeText(effectiveUnitTitle)}`;
   const [unitResult] = await sql`
     WITH lock AS (
       SELECT pg_advisory_xact_lock(hashtext(${unitKey}))
     ),
     existing AS (
       SELECT u.* FROM units u, lock
-      WHERE u.code = ${code} AND lower(u.title) = ${normalizeText(unitTitle)}
+      WHERE u.code = ${code} AND lower(u.title) = ${normalizeText(effectiveUnitTitle)}
       LIMIT 1
     ),
     inserted AS (
       INSERT INTO units (code, code_display, title)
-      SELECT ${code}, ${unitCodeRaw.toString().trim().slice(0, 80)}, ${unitTitle.slice(0, 200)}
+      SELECT ${code}, ${effectiveUnitCode.trim().slice(0, 80)}, ${effectiveUnitTitle.slice(0, 200)}
       WHERE NOT EXISTS (SELECT 1 FROM existing)
       ON CONFLICT (code, title) DO UPDATE SET code_display = units.code_display
       RETURNING *
@@ -272,7 +281,8 @@ upload.post('/', async (c) => {
 
     const noteScope = type === 'notes' ? noteScopeRaw : 'complete';
 
-    const finalTitle = resourceTitle ||
+    const autoFilenameTitle = !hasUnitMetadata && uploadedFiles.length ? `Unclassified - ${uploadedFiles[0].name.replace(/\.[^.]+$/, '').slice(0, 170)}` : null;
+    const finalTitle = resourceTitle || autoFilenameTitle ||
       (type === 'cat' ? `CAT - ${academicYear}` :
        type === 'exam' ? `Exam - ${academicYear}` :
        `${capitalize(type)} - ${unit.code_display}`);
@@ -344,12 +354,67 @@ upload.post('/', async (c) => {
 
     const [resource] = await sql`SELECT * FROM resources WHERE content_hash = ${contentHash} AND unit_id = ${unit.id} LIMIT 1`;
     const savedFiles = await sql`
-      SELECT id, order_index, file_name AS name, file_url AS url, file_ext AS ext, file_size_bytes
+      SELECT id, order_index, file_name AS name, file_url AS url, file_ext AS ext, file_size_bytes, file_hash
       FROM resource_files WHERE resource_id = ${resource.id}
       ORDER BY order_index ASC
     `;
 
-    return c.json({ resource: { ...resource, files: savedFiles }, unit }, 201);
+    // Queue supported files for extraction as part of upload. Heavy PDF parsing/OCR
+    // still runs in the processing console (or a configured external processor), not
+    // inside this request. Upload success is preserved if the optional processing
+    // schema is not installed yet; the response reports the queue error explicitly.
+    const externalKinds = new Set(['pdf','png','jpg','jpeg','webp','tif','tiff','bmp','gif','txt','md','markdown','csv','tsv','html','htm','json','xml','yaml','yml','rtf','doc','docx','ppt','pptx','xls','xlsx','odt','ods','odp','epub','eml']);
+    const queuedJobs = [];
+    const notQueuedFiles = [];
+    const settings = { mode: 'standard', languages: [], ocr: true, dpi: 220, psm: 3,
+      preprocess: ['grayscale', 'contrast'], timeout_ms: 60000, activate: true, pages: null };
+    for (const file of savedFiles) {
+      const ext = String(file.ext || '').toLowerCase();
+      if (!externalKinds.has(ext)) {
+        notQueuedFiles.push({ file_id: file.id, name: file.name, reason: 'unsupported_by_backend_processor' });
+        continue;
+      }
+      try {
+        const dKey = await dedupeKey({ resource_id: resource.id, file_id: file.id, operation: 'extract', settings: { mode: settings.mode, languages: settings.languages }, pages: null });
+        const rHash = await requestHash({ r: String(resource.id), f: String(file.id), operation: 'extract', mode: settings.mode, languages: settings.languages, pages: null, activate: false });
+        const [job] = await sql`
+          INSERT INTO document_processing_jobs
+            (resource_id, file_id, job_type, operation, executor, status, input_json, settings,
+             dedupe_key, request_hash, requested_by, request_id)
+          VALUES
+            (${resource.id}, ${file.id}, 'extract', 'extract', 'external', 'queued',
+             ${JSON.stringify({ source_sha256: file.file_hash })}::jsonb,
+             ${JSON.stringify(settings)}::jsonb, ${dKey}, ${rHash}, 'upload-auto', ${c.req.header('cf-ray') || null})
+          ON CONFLICT DO NOTHING RETURNING id, status`;
+        if (job) queuedJobs.push({ id: job.id, file_id: file.id, state: job.status });
+        else {
+          const [active] = await sql`SELECT id, status FROM document_processing_jobs WHERE dedupe_key=${dKey} AND status IN ('queued','running','retry_wait')`;
+          if (active) queuedJobs.push({ id: active.id, file_id: file.id, state: active.status, deduplicated: true });
+          else notQueuedFiles.push({ file_id: file.id, name: file.name, reason: 'job_conflict_retry_later' });
+        }
+      } catch (queueError) {
+        console.error('automatic processing enqueue failed', { resource_id: resource.id, file_id: file.id, message: queueError?.message || String(queueError) });
+        notQueuedFiles.push({ file_id: file.id, name: file.name, reason: 'queue_unavailable' });
+      }
+    }
+
+    if (queuedJobs.length) {
+      await sql`UPDATE resources SET processing_status='processing' WHERE id=${resource.id}`;
+      await sql`UPDATE resource_files SET processing_status='processing' WHERE resource_id=${resource.id} AND id=ANY(${savedFiles.map((f) => f.id)})`;
+    }
+
+    return c.json({
+      resource: { ...resource, processing_status: queuedJobs.length ? 'processing' : resource.processing_status, files: savedFiles.map(({ file_hash, ...file }) => file) },
+      unit,
+      processing: {
+        queued: queuedJobs.length,
+        jobs: queuedJobs,
+        not_queued_files: notQueuedFiles,
+        executor: 'external',
+        auto_activate: true,
+        note: 'Backend extraction/OCR and verified-unit classification run automatically through the Cloudflare OCR Container when PROCESSOR_SHARED_SECRET is configured.'
+      }
+    }, 201);
   } catch (err) {
     // Only remove objects if the database transaction did not commit. A
     // later read failure must not delete files already referenced by rows.
