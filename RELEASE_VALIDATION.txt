@@ -1,0 +1,22 @@
+CommunityLib 4.4.0 local validation
+
+JavaScript syntax checks: passed for src/, test/, scripts/, and frontend/console/js/.
+Test command: node --import ./test/helpers/register-stubs.mjs --test
+Result: 65 total; 56 passed; 0 failed; 9 skipped.
+Skipped tests: database-backed tests require PGTEST_URL and a reachable disposable PostgreSQL database. They are not counted as passing.
+Production deployment: NOT performed.
+Live database/storage changes: NONE.
+
+Primary patch areas:
+- src/utils/ai-classification.js: deterministic evidence ranking, topic extraction, cautious document type inference, unvalidated suggested ranges.
+- src/routes/ai.js: source-evidence verification, conflict reporting, model-output filtering, confidence/review policy.
+- src/routes/upload.js: automatic extraction-job enqueue for supported browser-processor formats.
+- frontend/console/js/app.js: sequential auto-run of queued jobs while the protected console remains open; per-device opt-out.
+- src/routes/processing.js, src/lib/mcp.js, src/index.js, package.json, wrangler.toml: release version update.
+- test/ai-classification.test.js: regression tests for filename conflict, multi-unit detection/order, topics, and range validation.
+
+Important runtime boundary:
+- OCR still runs in the browser processor. It is not an always-on backend OCR service.
+- Queue creation depends on the document-intelligence migration being installed. If queue creation fails, upload succeeds and the API reports the files not queued.
+- Extraction results are not automatically activated for public search. Review/activation remains explicit.
+- AI_PUBLIC_ENABLED remains false; no public LLM spend was enabled.
