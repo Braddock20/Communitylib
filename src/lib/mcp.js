@@ -146,7 +146,7 @@ export async function handleMcpRequest(request, dispatch) {
     return new Response(JSON.stringify(rpcResult(body.id, {
       protocolVersion: version,
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'communitylib', title: 'CommunityLib AI Library Manager', version: '4.3.0' },
+      serverInfo: { name: 'communitylib', title: 'CommunityLib AI Library Manager', version: '4.4.0' },
       instructions: 'Search and inspect public library resources freely. Admin tools require Authorization: Bearer <ADMIN_API_KEY>. Review metadata and segmentation suggestions before applying them. Original files are preserved by default.',
     })), { status: 200, headers: { ...headers, 'MCP-Protocol-Version': version } });
   }
