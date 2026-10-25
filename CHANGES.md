@@ -90,3 +90,16 @@ this API keeps working. Two concrete fixes and one workflow change:
 - Added `frontend/agentic-tools.js`, a client toolkit for extraction, analysis, registry/library search, reviewable segments, split/merge/publish, job inspection and study tools.
 - Added unit tests for client configuration, admin-key gating and API error propagation.
 - Large PDF text extraction happens in the browser via PDF.js rather than buffering a 20+ MB PDF inside a Worker. Image-only scans require a future OCR integration.
+
+
+## 4.4.0 — deterministic document intelligence hardening
+
+- Added a registry-grounded deterministic evidence classifier for document-body codes, filename hints, official titles, aliases, and a conservative subject-topic lexicon.
+- Document-body evidence takes precedence over a conflicting filename or an incompatible model-selected unit.
+- When the document contains registered-unit evidence, model-returned units must independently match the document before being included in the detected-unit list.
+- Added explicit filename-conflict and evidence-tier fields to `/api/ai/analyze`; multi-unit and conflict cases are capped at cautious confidence and require review.
+- Deterministic topic extraction fills gaps when the optional AI provider returns no topics.
+- Page ranges suggested by a classifier are no longer marked `boundary_valid` merely because they are positive integers; physical validation must happen against the actual PDF before splitting.
+- Added regression tests for misleading filenames, multi-unit order, topic extraction, weak filename-only evidence, and unvalidated page ranges.
+
+This release does not enable public LLM usage, import provisional timetable entries automatically, change the production Worker, or alter existing stored resources. The existing database-backed test group still requires `PGTEST_URL`.
