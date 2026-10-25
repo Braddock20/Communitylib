@@ -37,66 +37,6 @@ export function detectUnitCodeMentions(text, registry = []) {
   return found;
 }
 
-export function classifyDocumentEvidence({ text = '', filename = '', registry = [] }) {
-  const haystack = `${filename || ''}\n${text || ''}`;
-  const registryUnits = Array.isArray(registry) ? registry.filter((unit) => unit && (unit.title || unit.unit_title || unit.code || unit.unit_code)) : [];
-  const detectedByCode = detectUnitCodeMentions(haystack, registryUnits);
-  const detected = [...detectedByCode];
-  const seen = new Set(detected.map((unit) => String(unit.id ?? normalizeCode(unit.code))));
-
-  for (const unit of registryUnits) {
-    const key = String(unit.id ?? normalizeCode(unit.code || unit.unit_code || ''));
-    if (!key) continue;
-
-    const titleCandidates = [unit.title || unit.unit_title || '', ...(Array.isArray(unit.aliases) ? unit.aliases : [])]
-      .filter((value) => typeof value === 'string' && value.trim().length >= 5)
-      .map((value) => value.trim());
-
-    const match = titleCandidates.some((candidate) => haystack.toLowerCase().includes(candidate.toLowerCase()));
-    if (match && !seen.has(key)) {
-      seen.add(key);
-      detected.push({
-        id: unit.id ?? null,
-        code: unit.code_display || unit.display_code || unit.code || unit.unit_code || '',
-        title: unit.title || unit.unit_title || null,
-      });
-    }
-  }
-
-  const isMultiUnit = detected.length > 1;
-  const primary = detected[0] || null;
-  const normalizedPrimaryCode = primary ? normalizeCode(primary.code || '') : '';
-  const codeCandidate = normalizeCode((haystack.match(/\b[A-Z]{2,8}[\s_-]*\d{2,4}[A-Z]?\b/i)?.[0] || ''));
-  const unverifiedCandidate = codeCandidate && (!normalizedPrimaryCode || codeCandidate !== normalizedPrimaryCode) ? codeCandidate : null;
-  const type = /\b(cat|continuous assessment|test)\b/i.test(haystack) ? 'cat'
-    : /\b(supplementary|special|end.of.semester|final exam|examination|exam)\b/i.test(haystack) ? 'exam'
-    : /\b(assignment|coursework)\b/i.test(haystack) ? 'assignment' : 'notes';
-  const yearMatch = haystack.match(/\b(20(?:0\d|1\d|2[0-9]))\b/);
-  const confidence = primary ? (isMultiUnit ? 0.58 : 0.74) : (codeCandidate ? 0.18 : 0.06);
-
-  return {
-    unit_id: primary?.id ?? null,
-    unit_code: primary?.code ?? null,
-    unit_title: primary?.title ?? null,
-    unit_code_verified: Boolean(primary),
-    unverified_code_candidate: unverifiedCandidate,
-    type,
-    academic_year: yearMatch ? Number(yearMatch[1]) : null,
-    display_title: filename ? filename.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() : (primary?.title || 'Untitled document'),
-    topics: [],
-    confidence,
-    reason: isMultiUnit
-      ? `Document appears to contain multiple registry units: ${detected.map((unit) => unit.code).join(', ')}. Manual review required.`
-      : primary
-        ? 'Matched the filename/text to a verified registry unit using deterministic evidence.'
-        : 'No verified registry match was found; human review is required.',
-    requires_review: !primary || isMultiUnit || Boolean(unverifiedCandidate),
-    detected_units: detected,
-    is_multi_unit_document: isMultiUnit,
-    provider: 'evidence-classifier',
-  };
-}
-
 /** Normalize untrusted AI page-range suggestions without making invalid ranges look valid. */
 export function sanitizeSuggestedSegments(segments, registry = [], maxSegments = 50) {
   if (!Array.isArray(segments)) return [];
@@ -120,7 +60,9 @@ export function sanitizeSuggestedSegments(segments, registry = [], maxSegments =
         ? Math.max(0, Math.min(1, Number(seg.confidence)))
         : 0.3,
       requires_review: true,
-      boundary_valid: rangeValid,
+      // A numerically plausible range is not proof that it maps to physical PDF pages.
+      // Only the split/validation workflow can establish that against a real PDF.
+      boundary_valid: false,
     };
   });
 }
@@ -163,4 +105,130 @@ export function validateSegmentBoundaries(segments, totalPages) {
     }
   }
   return errors;
+}
+
+
+const TOPIC_LEXICON = Object.freeze({
+  physics: [
+    ['Electricity and magnetism', /\b(coulomb|electric field|electric potential|voltage|capacitance|capacitor|current electricity|resistance|ohm.s law|magnetic flux|faraday|lenz law|electromagnetic induction|gauss law)\b/i],
+    ['Mechanics', /\b(mechanics|newton.s laws?|kinematics|dynamics|momentum|projectile motion|work and energy|rotational motion|friction)\b/i],
+    ['Waves and optics', /\b(wave motion|interference|diffraction|polarization|refraction|reflection|lens|optics|simple harmonic motion)\b/i],
+    ['Thermodynamics', /\b(thermodynamics|heat transfer|specific heat|entropy|gas laws|thermal expansion)\b/i],
+    ['Modern physics', /\b(photoelectric effect|quantum|radioactivity|nuclear physics|atomic spectra|relativity)\b/i],
+  ],
+  chemistry: [
+    ['Organic chemistry', /\b(alkane|alkene|alkyne|functional group|organic chemistry|stereochemistry|isomerism|nucleophilic|electrophilic|benzene|aromatic compound)\b/i],
+    ['Chemical bonding', /\b(ionic bond|covalent bond|molecular geometry|hybridization|bond energy|intermolecular forces)\b/i],
+    ['Acids and bases', /\b(ph|buffer solution|acid.base|titration|neutralization|equilibrium constant)\b/i],
+    ['Chemical kinetics', /\b(reaction rate|chemical kinetics|activation energy|rate law|catalyst)\b/i],
+    ['Electrochemistry', /\b(electrochemistry|electrolysis|galvanic cell|redox|oxidation|reduction potential)\b/i],
+  ],
+  mathematics: [
+    ['Calculus', /\b(derivative|differentiation|integration|integral calculus|limits? of functions|partial derivative)\b/i],
+    ['Linear algebra', /\b(matrix|matrices|determinant|eigenvalue|eigenvector|linear transformation)\b/i],
+    ['Differential equations', /\b(differential equation|ordinary differential|boundary value problem)\b/i],
+    ['Probability and statistics', /\b(probability distribution|standard deviation|hypothesis testing|regression|correlation|random variable)\b/i],
+  ],
+  computing: [
+    ['Programming', /\b(algorithm|pseudocode|programming|variable declaration|function definition|recursion|data structure)\b/i],
+    ['Databases', /\b(sql|relational database|normalization|primary key|foreign key|database schema)\b/i],
+    ['Computer networks', /\b(tcp\/ip|osi model|routing|network protocol|subnetting|computer networks?)\b/i],
+  ],
+  engineering: [
+    ['Engineering drawing', /\b(orthographic projection|isometric drawing|sectional view|dimensioning|engineering drawing)\b/i],
+    ['Materials science', /\b(tensile strength|stress.strain|yield strength|heat treatment|material properties|hardness test)\b/i],
+    ['Manufacturing processes', /\b(casting|machining|welding|forming process|manufacturing process|cnc)\b/i],
+  ],
+});
+
+function phraseInText(phrase, text) {
+  const p = String(phrase || '').trim().toLowerCase();
+  if (p.length < 5) return false;
+  // Permit punctuation/whitespace variation while retaining word boundaries.
+  const escaped = p.split(/[^a-z0-9]+/i).filter(Boolean).map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\W_]+');
+  if (!escaped) return false;
+  try { return new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(text); }
+  catch { return false; }
+}
+
+/**
+ * Deterministic document intelligence. This is evidence ranking, not a claimed
+ * probability: explicit registered codes in body text outrank filename hints,
+ * and the function returns every supported unit rather than forcing one label.
+ */
+export function classifyDocumentEvidence({ text = '', filename = '', registry = [] } = {}) {
+  const body = String(text || '').slice(0, 250_000);
+  const name = String(filename || '').slice(0, 500);
+  const combined = `${name}\n${body}`;
+  const bodyCodes = detectUnitCodeMentions(body, registry);
+  const filenameCodes = detectUnitCodeMentions(name, registry);
+  const bodyCodeOrder = new Map(bodyCodes.map((u, i) => [String(u.id ?? normalizeCode(u.code)), i]));
+  const scores = new Map();
+  const add = (unit, points, evidence) => {
+    const key = String(unit.id ?? normalizeCode(unit.code || unit.unit_code || ''));
+    if (!key) return;
+    const row = scores.get(key) || { id: unit.id ?? null, code: unit.code_display || unit.display_code || unit.code || unit.unit_code, title: unit.title || unit.unit_title || null, score: 0, evidence: [] };
+    row.score += points;
+    row.evidence.push(evidence);
+    scores.set(key, row);
+  };
+
+  for (const u of bodyCodes) add(u, 12, 'registered_code_in_body');
+  for (const u of filenameCodes) add(u, 5, 'registered_code_in_filename');
+
+  for (const unit of registry) {
+    const title = unit.title || unit.unit_title || '';
+    if (title && phraseInText(title, body)) add(unit, 9, 'official_title_in_body');
+    else if (title && phraseInText(title, name)) add(unit, 4, 'official_title_in_filename');
+    const aliases = Array.isArray(unit.aliases) ? unit.aliases : [];
+    for (const alias of aliases) {
+      if (phraseInText(alias, body)) { add(unit, 4, 'registered_alias_in_body'); break; }
+      if (phraseInText(alias, name)) { add(unit, 2, 'registered_alias_in_filename'); break; }
+    }
+  }
+
+  const ranked = [...scores.values()].map(row => ({ ...row, score: Math.min(30, row.score), evidence: [...new Set(row.evidence)] }))
+    .sort((a, b) => {
+      const ai = bodyCodeOrder.get(String(a.id ?? normalizeCode(a.code)));
+      const bi = bodyCodeOrder.get(String(b.id ?? normalizeCode(b.code)));
+      if (ai != null || bi != null) return (ai ?? Number.MAX_SAFE_INTEGER) - (bi ?? Number.MAX_SAFE_INTEGER);
+      return b.score - a.score || String(a.code).localeCompare(String(b.code));
+    });
+  const bodySupported = ranked.filter(row => row.evidence.some(e => e.endsWith('_in_body')));
+  const detected = bodySupported.length ? bodySupported : ranked.filter(row => row.evidence.some(e => e.endsWith('_in_filename')));
+  const topics = [];
+  for (const groups of Object.values(TOPIC_LEXICON)) {
+    for (const [label, pattern] of groups) if (pattern.test(body)) topics.push(label);
+  }
+
+  const primary = detected[0] || null;
+  const second = detected[1] || null;
+  const strongCode = Boolean(primary?.evidence.includes('registered_code_in_body'));
+  const multiUnit = detected.length > 1;
+  // Evidence tier is intentionally categorical; do not expose it as calibrated probability.
+  const tier = !primary ? 'none' : multiUnit ? 'multiple' : strongCode ? 'strong' : primary.evidence.includes('official_title_in_body') ? 'strong' : primary.evidence.some(e => e.endsWith('_in_body')) ? 'moderate' : 'weak';
+  return {
+    detected_units: detected.map(({ id, code, title, score, evidence }) => ({ id, code, title, score, evidence })),
+    primary_unit: primary,
+    topics: [...new Set(topics)].slice(0, 20),
+    multi_unit: multiUnit,
+    evidence_tier: tier,
+    // Helpful conflict signal: filename suggests a different registered unit from body.
+    filename_conflict: Boolean(bodySupported.length && filenameCodes.some(f => !bodySupported.some(b => String(b.id) === String(f.id)))),
+    second_unit: second,
+    text_chars: body.length,
+    body_code_count: bodyCodes.length,
+    filename_code_count: filenameCodes.length,
+    source: 'deterministic-evidence-v1',
+  };
+}
+
+/** Conservative document-type detection; specific evidence beats generic words. */
+export function inferDocumentType(text = '', filename = '') {
+  const source = `${filename}\n${text}`.toLowerCase();
+  if (/\b(assignment|coursework|individual task|group project)\b/.test(source)) return 'assignment';
+  if (/\b(cat\s*\d*|continuous assessment|class test|quiz|test paper)\b/.test(source)) return 'cat';
+  if (/\b(final exam|end.of.semester|supplementary exam|special exam|examination paper|past paper|exam paper)\b/.test(source)) return 'exam';
+  if (/\b(notes|lecture|chapter|topic|handout|revision)\b/.test(source)) return 'notes';
+  return 'other';
 }
