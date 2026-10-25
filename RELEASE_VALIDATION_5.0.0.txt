@@ -1,0 +1,14 @@
+CommunityLib 5.0.0 — local validation results
+
+PASS: Python processor syntax (py_compile).
+PASS: Processor unit tests (3 tests): nested ZIP safety, traversal rejection, text extraction and guardrail defaults.
+PASS: OCR fixture smoke tests: text PDF, scanned PDF, mixed PDF, image, DOCX, PPTX and XLSX all returned extracted text.
+PASS: Worker JavaScript syntax: src/index.js, src/ocr-container.js, src/routes/upload.js, src/routes/processing.js and src/routes/ai.js.
+PASS: Wrangler TOML and package.json parse; Cloudflare Container, Durable Object binding, migration and per-minute Cron configuration present.
+PASS: FastAPI local health, capability and unauthorized-ingest checks.
+PASS: Render deployment files removed.
+
+NOT RUN: full Node test suite (npm dependency installation timed out in this environment).
+NOT RUN: Docker image build (Docker is unavailable in this environment).
+NOT RUN: live Cloudflare deployment or remote end-to-end test; requires the owner's Cloudflare account, Worker secrets, Containers entitlement and deployment session.
+NOT RUN: production throughput, billing, and OCR accuracy benchmarking across every language/document variant.
