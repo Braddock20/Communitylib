@@ -52,3 +52,8 @@ Do not assume that uploading a ZIP to a chat automatically uploads its contents 
 ## MCP-capable clients
 
 Configure the remote MCP URL above in the client's supported connector settings and provide the admin token through the client's secure authentication mechanism if administrative tools are needed. Clients that cannot connect to remote MCP can still use this guide as instructions, but cannot perform remote writes unless they have another authorized API-calling capability.
+
+
+## Backend OCR and bulk ZIP ingestion (CommunityLib 5.0.0)
+
+Use the Cloudflare-native backend described in `processor/README.md`. ZIP archives are submitted to `/api/ocr/v1/ingest/archive` with the admin bearer key; supported files are created as individual resources, processed by the Container OCR workers, then classified by the existing verified-unit pipeline. Do not deploy a Render service.
