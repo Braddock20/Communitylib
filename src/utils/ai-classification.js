@@ -37,6 +37,66 @@ export function detectUnitCodeMentions(text, registry = []) {
   return found;
 }
 
+export function classifyDocumentEvidence({ text = '', filename = '', registry = [] }) {
+  const haystack = `${filename || ''}\n${text || ''}`;
+  const registryUnits = Array.isArray(registry) ? registry.filter((unit) => unit && (unit.title || unit.unit_title || unit.code || unit.unit_code)) : [];
+  const detectedByCode = detectUnitCodeMentions(haystack, registryUnits);
+  const detected = [...detectedByCode];
+  const seen = new Set(detected.map((unit) => String(unit.id ?? normalizeCode(unit.code))));
+
+  for (const unit of registryUnits) {
+    const key = String(unit.id ?? normalizeCode(unit.code || unit.unit_code || ''));
+    if (!key) continue;
+
+    const titleCandidates = [unit.title || unit.unit_title || '', ...(Array.isArray(unit.aliases) ? unit.aliases : [])]
+      .filter((value) => typeof value === 'string' && value.trim().length >= 5)
+      .map((value) => value.trim());
+
+    const match = titleCandidates.some((candidate) => haystack.toLowerCase().includes(candidate.toLowerCase()));
+    if (match && !seen.has(key)) {
+      seen.add(key);
+      detected.push({
+        id: unit.id ?? null,
+        code: unit.code_display || unit.display_code || unit.code || unit.unit_code || '',
+        title: unit.title || unit.unit_title || null,
+      });
+    }
+  }
+
+  const isMultiUnit = detected.length > 1;
+  const primary = detected[0] || null;
+  const normalizedPrimaryCode = primary ? normalizeCode(primary.code || '') : '';
+  const codeCandidate = normalizeCode((haystack.match(/\b[A-Z]{2,8}[\s_-]*\d{2,4}[A-Z]?\b/i)?.[0] || ''));
+  const unverifiedCandidate = codeCandidate && (!normalizedPrimaryCode || codeCandidate !== normalizedPrimaryCode) ? codeCandidate : null;
+  const type = /\b(cat|continuous assessment|test)\b/i.test(haystack) ? 'cat'
+    : /\b(supplementary|special|end.of.semester|final exam|examination|exam)\b/i.test(haystack) ? 'exam'
+    : /\b(assignment|coursework)\b/i.test(haystack) ? 'assignment' : 'notes';
+  const yearMatch = haystack.match(/\b(20(?:0\d|1\d|2[0-9]))\b/);
+  const confidence = primary ? (isMultiUnit ? 0.58 : 0.74) : (codeCandidate ? 0.18 : 0.06);
+
+  return {
+    unit_id: primary?.id ?? null,
+    unit_code: primary?.code ?? null,
+    unit_title: primary?.title ?? null,
+    unit_code_verified: Boolean(primary),
+    unverified_code_candidate: unverifiedCandidate,
+    type,
+    academic_year: yearMatch ? Number(yearMatch[1]) : null,
+    display_title: filename ? filename.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() : (primary?.title || 'Untitled document'),
+    topics: [],
+    confidence,
+    reason: isMultiUnit
+      ? `Document appears to contain multiple registry units: ${detected.map((unit) => unit.code).join(', ')}. Manual review required.`
+      : primary
+        ? 'Matched the filename/text to a verified registry unit using deterministic evidence.'
+        : 'No verified registry match was found; human review is required.',
+    requires_review: !primary || isMultiUnit || Boolean(unverifiedCandidate),
+    detected_units: detected,
+    is_multi_unit_document: isMultiUnit,
+    provider: 'evidence-classifier',
+  };
+}
+
 /** Normalize untrusted AI page-range suggestions without making invalid ranges look valid. */
 export function sanitizeSuggestedSegments(segments, registry = [], maxSegments = 50) {
   if (!Array.isArray(segments)) return [];
