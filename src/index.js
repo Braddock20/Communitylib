@@ -11,13 +11,26 @@ import ai from './routes/ai.js';
 import { resolveDb } from './db.js';
 import { createProcessingRouter, recoverStale } from './routes/processing.js';
 import { handleMcpRequest, MCP_TOOLS } from './lib/mcp.js';
+import { OCRContainer } from './ocr-container.js';
+export { OCRContainer };
 
 
 const app = new Hono();
 
+function constantTimeEqual(a, b) {
+  const x = new TextEncoder().encode(String(a || ''));
+  const y = new TextEncoder().encode(String(b || ''));
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] || 0) ^ (y[i] || 0);
+  return diff === 0;
+}
+
 function limitedBy(bindingName) {
   return async (c, next) => {
     if (c.req.method === 'OPTIONS') return next();
+    const trustedProcessor = c.env.PROCESSOR_SHARED_SECRET && c.req.header('x-processor-key') &&
+      constantTimeEqual(c.req.header('x-processor-key'), c.env.PROCESSOR_SHARED_SECRET);
+    if (trustedProcessor) return next();
     const binding = c.env[bindingName];
     const ip = c.req.header('cf-connecting-ip');
     if (!binding || typeof binding.limit !== 'function' || !ip) {
@@ -80,7 +93,7 @@ app.use(
 app.get('/', (c) => c.json({
   ok: true,
   app: c.env.APP_NAME || 'UoE Student Resources API',
-  version: c.env.APP_VERSION || '4.3.0',
+  version: c.env.APP_VERSION || '4.4.0',
 }));
 
 // Liveness: deliberately does not touch the database. If this 503s, the
@@ -164,31 +177,61 @@ app.route('/api/ai', ai);
 // initialize/tools/list/tools/call requests to /mcp. Internal dispatch keeps
 // business logic in the existing API routes rather than duplicating it.
 app.use('/mcp', limitedBy('MCP_LIMITER'));
-
 app.post('/mcp', (c) => handleMcpRequest(c.req.raw, (path, init) => {
-  const headers = new Headers(init?.headers);
-  const clientIp = c.req.header('cf-connecting-ip');
-
-  if (clientIp) {
-    headers.set('cf-connecting-ip', clientIp);
-  }
-
-  const internalRequest = new Request(new URL(path, c.req.url), {
-    ...init,
-    headers,
-  });
-
+  const internalRequest = new Request(new URL(path, c.req.url), init);
   return app.fetch(internalRequest, c.env, c.executionCtx);
 }));
 app.get('/mcp', (c) => c.json({
   name: 'CommunityLib AI Library Manager',
-  version: c.env.APP_VERSION || '4.3.0',
+  version: c.env.APP_VERSION || '4.4.0',
   protocol: 'MCP Streamable HTTP (stateless JSON-RPC POST)',
   endpoint: new URL('/mcp', c.req.url).href,
   auth: 'Read tools are public; administrative tools require Authorization: Bearer <ADMIN_API_KEY>.',
   setup: 'Add this remote MCP URL in an MCP-compatible AI client. Clients that cannot connect to remote MCP can use AI_LIBRARY_GUIDE.md and the regular REST API.',
   tools: MCP_TOOLS.map(({ name, description }) => ({ name, description })),
 }));
+
+
+// Cloudflare-native OCR/ZIP ingestion API. The admin key authenticates the caller;
+// the Durable Object injects the private processor secret before forwarding to Linux.
+app.all('/api/ocr/*', async (c) => {
+  const path = new URL(c.req.url).pathname;
+  // Cheap public liveness check must not start/bill a Linux container.
+  if (path === '/api/ocr/health' && c.req.method === 'GET') {
+    return c.json({ ok: true, service: 'communitylib-cloudflare-ocr', configured: Boolean(c.env.OCR_CONTAINER && c.env.PROCESSOR_SHARED_SECRET),
+      live_health: '/api/ocr/v1/health (admin only)' });
+  }
+  const expected = c.env.ADMIN_API_KEY;
+  const supplied = c.req.header('authorization')?.replace(/^Bearer\s+/i, '') || c.req.header('x-admin-key');
+  if (!expected || !supplied || !constantTimeEqual(supplied, expected)) {
+    return c.json({ error: 'admin authorization required' }, 401);
+  }
+  // Batch status is served directly from PostgreSQL; it must not wake an OCR Container.
+  if (path === '/api/ocr/v1/import/status' && c.req.method === 'GET') {
+    const raw = new URL(c.req.url).searchParams.get('resource_ids') || '';
+    const ids = [...new Set(raw.split(',').map((x) => Number(x.trim())).filter((x) => Number.isSafeInteger(x) && x > 0))].slice(0, 200);
+    if (!ids.length || raw.split(',').length > 200) return c.json({ error: 'resource_ids must contain 1-200 numeric resource IDs' }, 400);
+    const sql = await getDb(c.env);
+    const [resources, jobRows] = await Promise.all([
+      sql`SELECT r.id, r.title, r.type, r.academic_year, r.processing_status, u.code_display AS unit_code, u.title AS unit_title
+        FROM resources r JOIN units u ON u.id=r.unit_id WHERE r.id=ANY(${ids}) AND r.is_flagged=false`,
+      sql`SELECT resource_id, json_agg(json_build_object('id',id,'status',status,'error_code',error_code) ORDER BY created_at) AS jobs
+        FROM document_processing_jobs WHERE resource_id=ANY(${ids}) GROUP BY resource_id`,
+    ]);
+    const byResource = new Map(jobRows.map((row) => [String(row.resource_id), row.jobs || []]));
+    return c.json({ resources: resources.map((row) => ({ ...row, id: String(row.id), jobs: byResource.get(String(row.id)) || [] })) });
+  }
+  if (!c.env.OCR_CONTAINER) return c.json({ error: 'cloudflare_ocr_container_not_configured' }, 503);
+  try {
+    const headers = new Headers(c.req.raw.headers);
+    headers.set('x-processor-shard', 'processor-0');
+    const request = new Request(c.req.raw, { headers });
+    return await c.env.OCR_CONTAINER.getByName('processor-0').fetch(request);
+  } catch (error) {
+    console.error('OCR container request failed', error?.message || String(error));
+    return c.json({ error: 'ocr_container_unavailable', message: 'OCR service could not start or respond. Retry the request.' }, 503);
+  }
+});
 
 app.notFound((c) => c.json({ error: 'not found' }, 404));
 
@@ -215,8 +258,41 @@ app.onError((err, c) => {
 
 export default {
   fetch: app.fetch,
-  // Cron: re-queue jobs whose browser/processor stopped reporting (closed tab, crash).
+  // Recover stale leases and wake OCR containers only while jobs exist.
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(recoverStale(env).catch((e) => console.error('stale recovery failed', e?.message || String(e))));
+    ctx.waitUntil(Promise.all([
+      recoverStale(env).catch((e) => console.error('stale recovery failed', e?.message || String(e))),
+      wakeOcrProcessors(env).catch((e) => console.error('OCR wake check failed', e?.message || String(e))),
+    ]));
   },
 };
+
+
+async function wakeOcrProcessors(env) {
+  if (!env.OCR_CONTAINER || !env.ADMIN_API_KEY || !env.PROCESSOR_SHARED_SECRET) return;
+  const sql = await getDb(env);
+  const rows = await sql`SELECT id, status, leased_by FROM document_processing_jobs
+    WHERE executor='external' AND (
+      (status IN ('queued','retry_wait') AND (next_attempt_at IS NULL OR next_attempt_at <= now())) OR
+      (status='running' AND lease_expires_at > now())
+    ) ORDER BY created_at LIMIT 200`;
+  if (!rows.length) return; // idle containers sleep; the API remains available 24/7.
+  const shards = new Set();
+  for (const row of rows) {
+    const match = String(row.leased_by || '').match(/^communitylib-(processor-\d+)$/);
+    if (match) shards.add(match[1]);
+  }
+  const queued = rows.filter((row) => ['queued','retry_wait'].includes(row.status)).length;
+  if (queued) {
+    const needed = Math.min(3, Math.max(1, Math.ceil(queued / 5)));
+    for (let i = 0; i < needed; i++) shards.add(`processor-${i}`);
+  }
+  if (!shards.size) for (let i = 0; i < Math.min(3, Math.max(1, Math.ceil(rows.length / 3))); i++) shards.add(`processor-${i}`);
+  await Promise.all([...shards].map((shard) => {
+    const stub = env.OCR_CONTAINER.getByName(shard);
+    const headers = new Headers({ 'x-processor-shard': shard });
+    return stub.fetch(new Request('https://container/health', { headers })).catch((error) => {
+      console.error('OCR container wake failed', { shard, message: error?.message || String(error) });
+    });
+  }));
+}
