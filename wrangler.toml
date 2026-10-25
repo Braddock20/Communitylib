@@ -3,6 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 
+
 # ---- Secrets (set in the Cloudflare dashboard, not here) ----
 # Workers & Pages -> communitylib -> Settings -> Variables and Secrets -> Add
 # Toggle "Encrypt" on for every one of these.
@@ -26,11 +27,22 @@ compatibility_flags = ["nodejs_compat"]
 MAX_FILE_SIZE_MB = "25"
 MAX_FILES_PER_UPLOAD = "20"
 MAX_TOTAL_UPLOAD_MB = "25"
-APP_VERSION = "4.3.0"
-AI_PUBLIC_ENABLED = "true"
+APP_VERSION = "5.0.0"
+AI_PUBLIC_ENABLED = "false"
 PDF_PROCESSING_ENABLED = "true"
-IMAGE_PDF_COMBINE_ENABLED = "true"
+IMAGE_PDF_COMBINE_ENABLED = "false"
 AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
+COMMUNITYLIB_API_URL = "https://communitylib.talesapi.workers.dev"
+OCR_POLL_SECONDS = "5"
+OCR_PROCESSOR_CONCURRENCY = "2"
+OCR_MAX_PAGES_PER_JOB = "1000"
+OCR_MAX_ARCHIVE_ENTRIES = "5000"
+OCR_MAX_ARCHIVE_DEPTH = "4"
+OCR_MAX_ARCHIVE_UNPACKED_GB = "4"
+OCR_MAX_ARCHIVE_ENTRY_MB = "25"
+OCR_MAX_ARCHIVE_UPLOAD_MB = "90"
+OCR_MAX_IMPORT_FILES = "2000"
+OCR_DEFAULT_LANG = "eng+swa"
 APP_NAME = "University of Eldoret Student Resources"
 
 # No [[routes]] block: this deploys to the default *.workers.dev subdomain.
@@ -41,7 +53,7 @@ APP_NAME = "University of Eldoret Student Resources"
 
 # Re-queues processing jobs whose worker stopped reporting (needs 1 of the 5 free cron triggers).
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]
 
 # Admin console (static). /api/* and /health* still go to the Worker first.
 [assets]
@@ -113,3 +125,25 @@ simple = { limit = 120, period = 60 }
 name = "MCP_LIMITER"
 namespace_id = "1004"
 simple = { limit = 60, period = 60 }
+
+# Add this encrypted Worker secret after deploying the backend processor:
+#   wrangler secret put PROCESSOR_SHARED_SECRET
+# Use the same value in the processor service environment. Never put it in [vars].
+
+
+# Cloudflare-native Linux OCR workers. Three named Durable Objects can scale
+# independently; cron wakes them only while external processing jobs exist.
+[[containers]]
+class_name = "OCRContainer"
+image = "./processor/Dockerfile"
+image_build_context = "."
+instance_type = "standard-3"
+max_instances = 3
+
+[[durable_objects.bindings]]
+name = "OCR_CONTAINER"
+class_name = "OCRContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OCRContainer"]
